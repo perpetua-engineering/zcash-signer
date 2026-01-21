@@ -1,0 +1,31 @@
+# Rust configuration for Apple tier-3 targets (watchOS)
+# These require nightly and -Z build-std=core,alloc
+
+# watchOS Device targets
+[target.aarch64-apple-watchos]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "panic=abort"]
+
+[target.arm64_32-apple-watchos]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "panic=abort"]
+
+# watchOS Simulator targets
+[target.aarch64-apple-watchos-sim]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "panic=abort"]
+
+[target.x86_64-apple-watchos-sim]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "panic=abort"]
+
+# iOS targets (tier-2, but use same flags for consistency)
+[target.aarch64-apple-ios]
+rustflags = ["-C", "panic=abort"]
+
+[target.aarch64-apple-ios-sim]
+rustflags = ["-C", "panic=abort"]
+
+[target.x86_64-apple-ios]
+rustflags = ["-C", "panic=abort"]
+
+[unstable]
+build-std = ["core", "alloc"]
+# Note: panic_immediate_abort is now a real panic strategy in newer nightlies
+# Set via [profile.release] panic = "abort" in Cargo.toml instead

@@ -1,0 +1,61 @@
+[package]
+name = "zcash_signer"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal Zcash signing primitives for watchOS - ZIP-32 key derivation and RedPallas signing"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# Core crypto - all no_std compatible
+# RedPallas signatures on Pallas curve (Orchard)
+reddsa = { version = "0.5", default-features = false, features = ["alloc"] }
+# Pallas curve for Orchard scalars and points
+pasta_curves = { version = "0.5", default-features = false, features = ["alloc"] }
+# Field and group traits
+ff = { version = "0.13", default-features = false }
+group = { version = "0.13", default-features = false, features = ["alloc"] }
+
+# Sinsemilla for IVK derivation
+sinsemilla = { version = "0.1", default-features = false }
+
+# BLAKE2b for ZIP-32 PRF^expand
+blake2b_simd = { version = "1.0", default-features = false }
+
+# Random number generation via callback
+rand_core = { version = "0.6", default-features = false }
+
+# BIP-44 transparent key derivation (secp256k1)
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"] }
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+# RIPEMD-160 for P2PKH address derivation
+ripemd = { version = "0.1", default-features = false }
+
+# Base58check for transparent addresses
+bs58 = { version = "0.5", default-features = false, features = ["alloc", "check"] }
+
+[dev-dependencies]
+# For validation against reference implementations
+hex = "0.4"
+
+[features]
+default = []
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true           # Link-time optimization
+codegen-units = 1    # Better optimization
+panic = "abort"      # Smaller binary, no unwinding
+strip = true         # Strip symbols
+
+# Patches for watchOS compatibility
+[patch.crates-io]
+# Patch constant_time_eq to fix arm64_32 support
+# The upstream NEON code uses hardcoded u64 which fails on arm64_32 (32-bit pointers)
+constant_time_eq = { path = "vendor/constant_time_eq" }
+# Patch blake2b_simd to disable std by default
+# The std feature enables CPU feature detection which hangs on watchOS simulator
+blake2b_simd = { path = "vendor/blake2b_simd" }
