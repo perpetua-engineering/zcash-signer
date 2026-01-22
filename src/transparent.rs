@@ -350,3 +350,95 @@ pub unsafe extern "C" fn zsig_derive_transparent_pubkey_hash(
 
     ZsigError::Success
 }
+
+/// Sign a transparent input sighash using BIP-44 derived key
+///
+/// # Arguments
+/// - `seed`: BIP-39 seed bytes
+/// - `seed_len`: length of seed (usually 64)
+/// - `derivation_path`: BIP-32 derivation path components
+/// - `path_len`: number of path components (usually 5)
+/// - `sighash`: 32-byte sighash to sign
+/// - `sighash_type`: sighash type (usually 0x01 for SIGHASH_ALL)
+/// - `signature_out`: output buffer for DER signature (at least 72 bytes)
+/// - `signature_len_out`: output for actual signature length
+/// - `pubkey_out`: output buffer for compressed pubkey (33 bytes)
+///
+/// # Safety
+/// - All pointers must be valid
+/// - signature_out must have space for 72 bytes
+/// - pubkey_out must have space for 33 bytes
+#[no_mangle]
+pub unsafe extern "C" fn zsig_sign_transparent(
+    seed: *const u8,
+    seed_len: usize,
+    derivation_path: *const u32,
+    path_len: usize,
+    sighash: *const u8,
+    _sighash_type: u8,
+    signature_out: *mut u8,
+    signature_len_out: *mut usize,
+    pubkey_out: *mut u8,
+) -> ZsigError {
+    if seed.is_null() || derivation_path.is_null() || sighash.is_null()
+        || signature_out.is_null() || signature_len_out.is_null() || pubkey_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+
+    if seed_len < 16 || seed_len > 64 {
+        return ZsigError::InvalidSeed;
+    }
+
+    let seed_slice = slice::from_raw_parts(seed, seed_len);
+    let path_slice = slice::from_raw_parts(derivation_path, path_len);
+    let sighash_slice = slice::from_raw_parts(sighash, 32);
+
+    // Derive the key using the path
+    let (mut sk, mut cc) = bip32_master_key(seed_slice);
+
+    for &component in path_slice {
+        let is_hardened = (component & 0x80000000) != 0;
+        if is_hardened {
+            match bip32_derive_hardened(&sk, &cc, component) {
+                Some((new_sk, new_cc)) => { sk = new_sk; cc = new_cc; }
+                None => return ZsigError::InvalidKey,
+            }
+        } else {
+            match bip32_derive_normal(&sk, &cc, component) {
+                Some((new_sk, new_cc)) => { sk = new_sk; cc = new_cc; }
+                None => return ZsigError::InvalidKey,
+            }
+        }
+    }
+
+    // Sign the sighash
+    use k256::ecdsa::{SigningKey, signature::Signer};
+
+    let signing_key = match SigningKey::from_slice(&sk) {
+        Ok(key) => key,
+        Err(_) => return ZsigError::InvalidKey,
+    };
+
+    // Get the public key
+    let pubkey = match derive_secp256k1_pubkey(&sk) {
+        Some(pk) => pk,
+        None => return ZsigError::InvalidKey,
+    };
+
+    // Sign - k256 produces a Signature
+    let signature: k256::ecdsa::Signature = signing_key.sign(sighash_slice);
+
+    // Convert to DER format
+    let der_sig = signature.to_der();
+    let der_bytes = der_sig.as_bytes();
+
+    // Copy outputs
+    let sig_out_slice = slice::from_raw_parts_mut(signature_out, der_bytes.len().min(72));
+    sig_out_slice[..der_bytes.len().min(72)].copy_from_slice(&der_bytes[..der_bytes.len().min(72)]);
+    *signature_len_out = der_bytes.len();
+
+    let pubkey_out_slice = slice::from_raw_parts_mut(pubkey_out, 33);
+    pubkey_out_slice.copy_from_slice(&pubkey);
+
+    ZsigError::Success
+}

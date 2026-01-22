@@ -30,6 +30,14 @@ let package = Package(
             name: "ZcashSignerLocal",
             targets: ["ZcashSignerCore"]
         ),
+        .executable(
+            name: "pczt-cli",
+            targets: ["pczt-cli"]
+        ),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
+        .package(path: "../zcash-swift-wallet-sdk"),
     ],
     targets: [
         // C header declarations - library path comes from Xcode build settings
@@ -47,6 +55,16 @@ let package = Package(
             name: "ZcashSignerCore",
             dependencies: ["CZcashSigner"],
             path: "Sources/ZcashSignerSwift"
+        ),
+        // PCZT CLI tool
+        .executableTarget(
+            name: "pczt-cli",
+            dependencies: [
+                "ZcashSignerCore",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "ZcashLightClientKit", package: "zcash-swift-wallet-sdk"),
+            ],
+            path: "pczt-cli"
         ),
     ]
 )

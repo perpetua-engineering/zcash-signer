@@ -279,6 +279,33 @@ ZsigError zsig_derive_transparent_pubkey_hash(const uint8_t* seed,
                                                uint32_t index,
                                                uint8_t* hash_out);
 
+/*
+ * Sign a transparent input using BIP-44 derived key (secp256k1/ECDSA)
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes (typically 64 bytes)
+ *   seed_len: Length of the seed (16-64 bytes)
+ *   derivation_path: Array of BIP-32 path components (with hardened bit set where needed)
+ *   path_len: Number of path components (typically 5)
+ *   sighash: 32-byte sighash to sign
+ *   sighash_type: Sighash type (0x01 for SIGHASH_ALL)
+ *   signature_out: Buffer for DER-encoded signature (at least 72 bytes)
+ *   signature_len_out: Output for actual signature length
+ *   pubkey_out: Buffer for compressed public key (33 bytes)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_sign_transparent(const uint8_t* seed,
+                                 size_t seed_len,
+                                 const uint32_t* derivation_path,
+                                 size_t path_len,
+                                 const uint8_t* sighash,
+                                 uint8_t sighash_type,
+                                 uint8_t* signature_out,
+                                 size_t* signature_len_out,
+                                 uint8_t* pubkey_out);
+
 /* ============================================================================
  * Version Info
  * ============================================================================ */
