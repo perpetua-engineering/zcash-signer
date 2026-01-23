@@ -22,3 +22,7 @@ xcuserdata/
 
 # pczt-cli state (local wallet data)
 # Note: wallet.json contains UFVK which is safe to share, but not secrets
+
+# Build artifacts
+__.SYMDEF
+pczt-cli/libzcash_signer.a
