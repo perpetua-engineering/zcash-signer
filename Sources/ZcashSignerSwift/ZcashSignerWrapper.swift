@@ -343,6 +343,67 @@ public func deriveTransparentPubkeyHash(
     return Data(hash)
 }
 
+// MARK: - Transparent Signing
+
+/// Sign a transparent input using BIP-44 derived key (secp256k1/ECDSA)
+///
+/// This produces a DER-encoded signature with sighash type byte appended,
+/// suitable for use in a transparent input's scriptSig.
+///
+/// - Parameters:
+///   - seed: BIP-39 seed (typically 64 bytes)
+///   - derivationPath: BIP-32 path components with hardened bits (e.g., [0x8000002C, 0x80000085, 0x80000000, 0, 0])
+///   - sighash: 32-byte sighash to sign
+///   - sighashType: Sighash type byte (default 0x01 = SIGHASH_ALL)
+/// - Returns: Tuple of (DER signature with sighash type appended, compressed 33-byte pubkey)
+public func signTransparent(
+    seed: Data,
+    derivationPath: [UInt32],
+    sighash: Data,
+    sighashType: UInt8 = 0x01
+) throws -> (signature: Data, pubkey: Data) {
+    guard sighash.count == 32 else {
+        throw ZcashSignerError.invalidKey
+    }
+    guard !derivationPath.isEmpty else {
+        throw ZcashSignerError.invalidKey
+    }
+
+    // DER signature can be up to 72 bytes + 1 byte sighash type
+    var signatureBuffer = [UInt8](repeating: 0, count: 73)
+    var signatureLen: Int = 0
+    var pubkeyBuffer = [UInt8](repeating: 0, count: 33)
+
+    let result = seed.withUnsafeBytes { seedPtr in
+        derivationPath.withUnsafeBufferPointer { pathPtr in
+            sighash.withUnsafeBytes { sighashPtr in
+                zsig_sign_transparent(
+                    seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    seed.count,
+                    pathPtr.baseAddress,
+                    derivationPath.count,
+                    sighashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    sighashType,
+                    &signatureBuffer,
+                    &signatureLen,
+                    &pubkeyBuffer
+                )
+            }
+        }
+    }
+
+    guard result.rawValue == 0 else {
+        throw ZcashSignerError(code: result.rawValue)
+    }
+
+    // The Rust function returns DER signature without sighash type,
+    // we need to append it
+    var signature = Data(signatureBuffer.prefix(signatureLen))
+    signature.append(sighashType)
+
+    return (signature: signature, pubkey: Data(pubkeyBuffer))
+}
+
 // MARK: - RNG Callback
 
 /// Callback for SecRandomCopyBytes, passed to Rust library

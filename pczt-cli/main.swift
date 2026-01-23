@@ -16,6 +16,7 @@ struct PCZTCli: ParsableCommand {
         subcommands: [
             InitCommand.self,
             SyncCommand.self,
+            AddressCommand.self,
             ProposeCommand.self,
             ExtractSighashesCommand.self,
             SignCommand.self,
