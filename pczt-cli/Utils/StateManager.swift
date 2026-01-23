@@ -186,6 +186,29 @@ struct SighashesOutput: Codable {
 struct OrchardSpendOutput: Codable {
     let index: UInt32
     let randomizer: String
+    let rk: String?
+    let isDummy: Bool?
+    let zip32Derivation: Zip32DerivationOutput?
+    let fvk: String?
+
+    enum CodingKeys: String, CodingKey {
+        case index
+        case randomizer
+        case rk
+        case isDummy = "dummy"
+        case zip32Derivation = "zip32_derivation"
+        case fvk
+    }
+}
+
+struct Zip32DerivationOutput: Codable {
+    let seedFingerprint: String
+    let derivationPath: [UInt32]
+
+    enum CodingKeys: String, CodingKey {
+        case seedFingerprint = "seed_fingerprint"
+        case derivationPath = "derivation_path"
+    }
 }
 
 struct SaplingSpendOutput: Codable {

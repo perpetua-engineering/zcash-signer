@@ -9,8 +9,8 @@
 //! - iPhone: Generates zk-SNARK proofs, builds PCZT
 //! - Watch: Holds spending keys, performs signing (this crate)
 
-#![no_std]
-#![feature(alloc_error_handler)]
+#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(feature = "std"), feature(alloc_error_handler))]
 
 extern crate alloc;
 
@@ -29,6 +29,7 @@ pub use transparent::*;
 // Global Allocator (required for no_std + alloc)
 // -----------------------------------------------------------------------------
 
+#[cfg(not(feature = "std"))]
 mod allocator {
     use core::alloc::{GlobalAlloc, Layout};
 
@@ -55,14 +56,17 @@ mod allocator {
     }
 }
 
+#[cfg(not(feature = "std"))]
 #[global_allocator]
 static ALLOCATOR: allocator::LibcAllocator = allocator::LibcAllocator;
 
+#[cfg(not(feature = "std"))]
 #[alloc_error_handler]
 fn alloc_error(_layout: core::alloc::Layout) -> ! {
     loop {}
 }
 
+#[cfg(not(feature = "std"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}

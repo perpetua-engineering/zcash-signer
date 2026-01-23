@@ -7,6 +7,8 @@ use crate::{ZsigError, ZsigOrchardSpendingKey, ZsigOrchardAsk};
 use blake2b_simd::Params;
 use ff::{PrimeField, FromUniformBytes};
 use pasta_curves::pallas;
+use reddsa::orchard::SpendAuth as OrchardSpendAuth;
+use reddsa::{SigningKey, VerificationKey};
 
 /// Zcash mainnet coin type (BIP-44 / ZIP-32)
 pub const ZCASH_MAINNET_COIN_TYPE: u32 = 133;
@@ -51,6 +53,26 @@ fn prf_expand(sk: &[u8; 32], domain: u8) -> [u8; 64] {
 /// Convert 64 bytes to Pallas scalar (mod r)
 fn to_scalar(bytes: &[u8; 64]) -> pallas::Scalar {
     pallas::Scalar::from_uniform_bytes(bytes)
+}
+
+/// Normalize Orchard ask to match Orchard's spend authorizing key derivation.
+///
+/// Orchard requires ask to be negated when the last bit of repr_P(ak) is 1.
+fn normalize_ask(ask: pallas::Scalar) -> pallas::Scalar {
+    let ask_bytes: [u8; 32] = ask.to_repr().into();
+    let sk = match SigningKey::<OrchardSpendAuth>::try_from(ask_bytes) {
+        Ok(key) => key,
+        Err(_) => return ask,
+    };
+
+    let vk: VerificationKey<OrchardSpendAuth> = (&sk).into();
+    let vk_bytes: [u8; 32] = vk.into();
+
+    if (vk_bytes[31] >> 7) == 1 {
+        -ask
+    } else {
+        ask
+    }
 }
 
 /// Derive a hardened Orchard child key using ZIP-32 CKDh
@@ -141,7 +163,7 @@ pub unsafe extern "C" fn zsig_derive_orchard_ask(
 
     // ask = PRF^expand(sk, 0x06) reduced to scalar
     let ask_expanded = prf_expand(&sk, ORCHARD_ASK);
-    let ask = to_scalar(&ask_expanded);
+    let ask = normalize_ask(to_scalar(&ask_expanded));
 
     (*ask_out).bytes = ask.to_repr();
 
@@ -189,7 +211,7 @@ pub unsafe extern "C" fn zsig_derive_orchard_ask_from_seed(
 
     // Derive ask from sk
     let ask_expanded = prf_expand(&sk, ORCHARD_ASK);
-    let ask = to_scalar(&ask_expanded);
+    let ask = normalize_ask(to_scalar(&ask_expanded));
 
     (*ask_out).bytes = ask.to_repr();
 

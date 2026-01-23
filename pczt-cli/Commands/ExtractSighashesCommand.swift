@@ -59,7 +59,19 @@ struct ExtractSighashesCommand: AsyncParsableCommand {
         let output = SighashesOutput(
             shieldedSighash: sighashes.shieldedSighash.hexString,
             orchardSpends: sighashes.orchardSpends.map {
-                OrchardSpendOutput(index: $0.index, randomizer: $0.randomizer.hexString)
+                OrchardSpendOutput(
+                    index: $0.index,
+                    randomizer: $0.randomizer.hexString,
+                    rk: $0.rk?.hexString,
+                    isDummy: $0.isDummy,
+                    zip32Derivation: $0.zip32Derivation.map {
+                        Zip32DerivationOutput(
+                            seedFingerprint: $0.seedFingerprint.hexString,
+                            derivationPath: $0.derivationPath
+                        )
+                    },
+                    fvk: $0.fvk?.hexString
+                )
             },
             saplingSpends: sighashes.saplingSpends.map {
                 SaplingSpendOutput(index: $0.index, randomizer: $0.randomizer.hexString)

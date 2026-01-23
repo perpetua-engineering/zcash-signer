@@ -8,9 +8,72 @@
 
 import ArgumentParser
 import Foundation
+import Darwin
 import ZcashLightClientKit
 import ZcashSignerCore
 import CZcashSigner
+
+private final class ToolsSigner {
+    typealias OrchardSignFn = @convention(c) (
+        UnsafePointer<UInt8>,
+        Int,
+        UInt32,
+        UnsafePointer<UInt8>,
+        Int,
+        UnsafePointer<UInt8>,
+        Int,
+        UnsafeMutablePointer<UInt8>
+    ) -> Bool
+
+    private let handle: UnsafeMutableRawPointer
+    private let orchardSign: OrchardSignFn
+
+    init?(path: String) {
+        guard let handle = dlopen(path, RTLD_NOW) else {
+            return nil
+        }
+        guard let sym = dlsym(handle, "zcash_signer_orchard_signature") else {
+            dlclose(handle)
+            return nil
+        }
+        self.handle = handle
+        self.orchardSign = unsafeBitCast(sym, to: OrchardSignFn.self)
+    }
+
+    deinit {
+        dlclose(handle)
+    }
+
+    func signOrchard(seed: Data, account: UInt32, sighash: Data, randomizer: Data) throws -> Data {
+        guard sighash.count == 32, randomizer.count == 32 else {
+            throw ValidationError("Invalid orchard sighash/randomizer length")
+        }
+
+        var signature = [UInt8](repeating: 0, count: 64)
+        let ok = seed.withUnsafeBytes { seedPtr in
+            sighash.withUnsafeBytes { sighashPtr in
+                randomizer.withUnsafeBytes { randomizerPtr in
+                    orchardSign(
+                        seedPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                        seed.count,
+                        account,
+                        sighashPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                        sighash.count,
+                        randomizerPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                        randomizer.count,
+                        &signature
+                    )
+                }
+            }
+        }
+
+        guard ok else {
+            throw ValidationError("Tools signer failed to sign Orchard spend")
+        }
+
+        return Data(signature)
+    }
+}
 
 struct SignCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -18,11 +81,29 @@ struct SignCommand: AsyncParsableCommand {
         abstract: "Sign sighashes with ASK (watch simulation)"
     )
 
+    enum SignerMode: String, ExpressibleByArgument {
+        case ask
+        case tools
+        case compare
+    }
+
     @Argument(help: "ASK (hex string, 64 characters)")
     var ask: String
 
     @Argument(help: "Sighashes JSON file path")
     var sighashesFile: String
+
+    @Option(name: .long, help: "Signer mode: ask (default), tools, compare")
+    var signer: SignerMode = .ask
+
+    @Option(name: .long, help: "Account index for seed-based signing")
+    var account: UInt32 = 0
+
+    @Option(
+        name: .long,
+        help: "Path to Tools/ZcashSigner dylib (for tools/compare modes)"
+    )
+    var toolsSignerPath: String = "../zcash-swift-wallet-sdk/Tools/ZcashSigner/target/release/libzcash_signer.dylib"
 
     mutating func run() async throws {
         errorOutput("[Sign] Loading sighashes from \(sighashesFile)...")
@@ -79,9 +160,71 @@ struct SignCommand: AsyncParsableCommand {
         errorOutput("[Sign]   Sapling spends: \(saplingSpends.count)")
         errorOutput("[Sign]   Transparent inputs: \(transparentInputs.count)")
 
-        // Sign with local signer
-        let signer = try LocalSigner(askHex: ask)
-        var signatures = try signer.sign(sighashes: sighashes)
+        var signatures: PCZTSignatures
+        let seedForTools: Data?
+        if signer != .ask {
+            seedForTools = try? SeedManager.parseSeed()
+            if seedForTools == nil {
+                throw ValidationError("ZCASH_SEED required for signer mode \(signer.rawValue)")
+            }
+        } else {
+            seedForTools = nil
+        }
+
+        if let seed = seedForTools, StateManager.shared.walletConfigExists() {
+            do {
+                let config = try StateManager.shared.loadWalletConfig()
+                let derivedUfvk = try deriveUFVK(seed: seed, account: account, network: config.network)
+                if derivedUfvk != config.ufvk {
+                    errorOutput("[Sign] Warning: UFVK derived from ZCASH_SEED does not match saved wallet config")
+                } else {
+                    errorOutput("[Sign] UFVK matches saved wallet config")
+                }
+            } catch {
+                errorOutput("[Sign] Warning: failed to compare UFVK with saved config: \(error)")
+            }
+        }
+
+        switch signer {
+        case .ask:
+            let localSigner = try LocalSigner(askHex: ask)
+            signatures = try localSigner.sign(sighashes: sighashes)
+        case .tools, .compare:
+            guard let seed = seedForTools else {
+                throw ValidationError("ZCASH_SEED required for tools signer")
+            }
+            guard let toolsSigner = ToolsSigner(path: toolsSignerPath) else {
+                throw ValidationError("Failed to load tools signer dylib at \(toolsSignerPath)")
+            }
+
+            let orchardSigs = try sighashes.orchardSpends.map { spend -> ShieldedSignature in
+                let signature = try toolsSigner.signOrchard(
+                    seed: seed,
+                    account: account,
+                    sighash: sighashes.shieldedSighash,
+                    randomizer: spend.randomizer
+                )
+                return ShieldedSignature(index: spend.index, signature: signature)
+            }
+
+            if signer == .compare {
+                let localSigner = try LocalSigner(askHex: ask)
+                let localSigs = try localSigner.sign(sighashes: sighashes).orchardSignatures
+                for sig in orchardSigs {
+                    if let local = localSigs.first(where: { $0.index == sig.index }) {
+                        if local.signature != sig.signature {
+                            errorOutput("[Sign] Orchard signature mismatch at index \(sig.index)")
+                        }
+                    }
+                }
+            }
+
+            signatures = PCZTSignatures(
+                orchardSignatures: orchardSigs,
+                saplingSignatures: [],
+                transparentSignatures: []
+            )
+        }
 
         // If there are transparent inputs and we have ZCASH_SEED, sign them
         if !transparentInputs.isEmpty {
@@ -149,6 +292,8 @@ struct SignCommand: AsyncParsableCommand {
                     0,
                     0
                 ]
+                let scriptPreview = input.scriptPubKey.prefix(16)
+                errorOutput("[Sign] Warning: derivation path missing for input \(input.index); using default \(path). scriptPubKey=\(scriptPreview)...")
             } else {
                 path = input.derivationPath
             }
@@ -208,5 +353,16 @@ struct SignCommand: AsyncParsableCommand {
             signature: Data(signatureBuffer.prefix(signatureLen)),
             publicKey: Data(pubkeyBuffer)
         )
+    }
+
+    private func deriveUFVK(seed: Data, account: UInt32, network: WalletConfig.NetworkType) throws -> String {
+        let zcashNetwork = network == .mainnet
+            ? ZcashNetworkBuilder.network(for: .mainnet)
+            : ZcashNetworkBuilder.network(for: .testnet)
+        let derivationTool = DerivationTool(networkType: zcashNetwork.networkType)
+        let accountIndex = Zip32AccountIndex(account)
+        let usk = try derivationTool.deriveUnifiedSpendingKey(seed: seed.bytes, accountIndex: accountIndex)
+        let ufvk = try derivationTool.deriveUnifiedFullViewingKey(from: usk)
+        return ufvk.stringEncoded
     }
 }
