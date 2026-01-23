@@ -404,6 +404,263 @@ public func signTransparent(
     return (signature: signature, pubkey: Data(pubkeyBuffer))
 }
 
+// MARK: - Orchard Address
+
+/// Orchard payment address (diversifier + pk_d)
+public struct ZcashOrchardAddress {
+    /// 11-byte diversifier
+    public let diversifier: Data
+    /// 32-byte diversified transmission key
+    public let pkD: Data
+
+    public init(diversifier: Data, pkD: Data) throws {
+        guard diversifier.count == 11 else {
+            throw ZcashSignerError.invalidKey
+        }
+        guard pkD.count == 32 else {
+            throw ZcashSignerError.invalidKey
+        }
+        self.diversifier = diversifier
+        self.pkD = pkD
+    }
+
+    /// Derive an Orchard address from a BIP-39 seed
+    ///
+    /// - Parameters:
+    ///   - seed: The BIP-39 seed (typically 64 bytes)
+    ///   - coinType: Coin type for derivation (default: 133 for mainnet)
+    ///   - account: Account index (default: 0)
+    /// - Returns: The derived Orchard address
+    public static func deriveFromSeed(
+        _ seed: Data,
+        coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
+        account: UInt32 = 0
+    ) throws -> ZcashOrchardAddress {
+        var address = ZsigOrchardAddress()
+
+        let result = seed.withUnsafeBytes { seedPtr in
+            zsig_derive_orchard_address_from_seed(
+                seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                seed.count,
+                coinType,
+                account,
+                &address
+            )
+        }
+
+        guard result.rawValue == 0 else {
+            throw ZcashSignerError(code: result.rawValue)
+        }
+
+        return try ZcashOrchardAddress(
+            diversifier: Data(bytes: &address.diversifier, count: 11),
+            pkD: Data(bytes: &address.pk_d, count: 32)
+        )
+    }
+
+    /// Encode as a Unified Address string
+    ///
+    /// - Parameter mainnet: true for mainnet (u...), false for testnet (utest...)
+    /// - Returns: The encoded Unified Address string
+    public func encodeUnifiedAddress(mainnet: Bool = true) throws -> String {
+        var address = ZsigOrchardAddress()
+        diversifier.withUnsafeBytes { ptr in
+            _ = memcpy(&address.diversifier, ptr.baseAddress!, 11)
+        }
+        pkD.withUnsafeBytes { ptr in
+            _ = memcpy(&address.pk_d, ptr.baseAddress!, 32)
+        }
+
+        var output = [UInt8](repeating: 0, count: 256)
+
+        let len = zsig_encode_unified_address(&address, mainnet, &output, 256)
+
+        guard len > 0 else {
+            throw ZcashSignerError.bufferTooSmall
+        }
+
+        guard let ua = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+            throw ZcashSignerError.invalidKey
+        }
+
+        return ua
+    }
+
+    /// Encode as a Unified Address with a transparent receiver
+    ///
+    /// This creates a UA that CEXs can use - they'll send to the transparent receiver
+    /// if they don't support Orchard.
+    ///
+    /// - Parameters:
+    ///   - transparentPubkeyHash: 20-byte transparent pubkey hash
+    ///   - mainnet: true for mainnet, false for testnet
+    /// - Returns: The encoded Unified Address string
+    public func encodeUnifiedAddressWithTransparent(
+        transparentPubkeyHash: Data,
+        mainnet: Bool = true
+    ) throws -> String {
+        guard transparentPubkeyHash.count == 20 else {
+            throw ZcashSignerError.invalidKey
+        }
+
+        var address = ZsigOrchardAddress()
+        diversifier.withUnsafeBytes { ptr in
+            _ = memcpy(&address.diversifier, ptr.baseAddress!, 11)
+        }
+        pkD.withUnsafeBytes { ptr in
+            _ = memcpy(&address.pk_d, ptr.baseAddress!, 32)
+        }
+
+        var output = [UInt8](repeating: 0, count: 256)
+
+        let len = transparentPubkeyHash.withUnsafeBytes { pkhPtr in
+            zsig_encode_unified_address_with_transparent(
+                &address,
+                pkhPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                mainnet,
+                &output,
+                256
+            )
+        }
+
+        guard len > 0 else {
+            throw ZcashSignerError.bufferTooSmall
+        }
+
+        guard let ua = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+            throw ZcashSignerError.invalidKey
+        }
+
+        return ua
+    }
+}
+
+// MARK: - Full Viewing Key
+
+/// Orchard Full Viewing Key components
+public struct ZcashOrchardFullViewingKey {
+    /// 32-byte authorization key
+    public let ak: Data
+    /// 32-byte nullifier deriving key
+    public let nk: Data
+    /// 32-byte randomized ivk
+    public let rivk: Data
+
+    public init(ak: Data, nk: Data, rivk: Data) throws {
+        guard ak.count == 32, nk.count == 32, rivk.count == 32 else {
+            throw ZcashSignerError.invalidKey
+        }
+        self.ak = ak
+        self.nk = nk
+        self.rivk = rivk
+    }
+
+    /// Derive an Orchard FVK from a BIP-39 seed
+    ///
+    /// - Parameters:
+    ///   - seed: The BIP-39 seed (typically 64 bytes)
+    ///   - coinType: Coin type for derivation (default: 133 for mainnet)
+    ///   - account: Account index (default: 0)
+    /// - Returns: The derived FVK
+    public static func deriveFromSeed(
+        _ seed: Data,
+        coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
+        account: UInt32 = 0
+    ) throws -> ZcashOrchardFullViewingKey {
+        var fvk = ZsigOrchardFullViewingKey()
+
+        let result = seed.withUnsafeBytes { seedPtr in
+            zsig_derive_orchard_full_viewing_key(
+                seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                seed.count,
+                coinType,
+                account,
+                &fvk
+            )
+        }
+
+        guard result.rawValue == 0 else {
+            throw ZcashSignerError(code: result.rawValue)
+        }
+
+        return try ZcashOrchardFullViewingKey(
+            ak: Data(bytes: &fvk.ak, count: 32),
+            nk: Data(bytes: &fvk.nk, count: 32),
+            rivk: Data(bytes: &fvk.rivk, count: 32)
+        )
+    }
+
+    /// Encode as a Unified Full Viewing Key string
+    ///
+    /// - Parameter mainnet: true for mainnet (uview...), false for testnet (uviewtest...)
+    /// - Returns: The encoded UFVK string
+    public func encodeUFVK(mainnet: Bool = true) throws -> String {
+        var fvk = ZsigOrchardFullViewingKey()
+        ak.withUnsafeBytes { ptr in
+            _ = memcpy(&fvk.ak, ptr.baseAddress!, 32)
+        }
+        nk.withUnsafeBytes { ptr in
+            _ = memcpy(&fvk.nk, ptr.baseAddress!, 32)
+        }
+        rivk.withUnsafeBytes { ptr in
+            _ = memcpy(&fvk.rivk, ptr.baseAddress!, 32)
+        }
+
+        var output = [UInt8](repeating: 0, count: 512)
+
+        let len = zsig_encode_unified_full_viewing_key(&fvk, mainnet, &output, 512)
+
+        guard len > 0 else {
+            throw ZcashSignerError.bufferTooSmall
+        }
+
+        guard let ufvk = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+            throw ZcashSignerError.invalidKey
+        }
+
+        return ufvk
+    }
+}
+
+/// Derive UFVK string directly from seed (convenience function)
+///
+/// - Parameters:
+///   - seed: The BIP-39 seed (typically 64 bytes)
+///   - coinType: Coin type for derivation (default: 133 for mainnet)
+///   - account: Account index (default: 0)
+///   - mainnet: true for mainnet, false for testnet
+/// - Returns: The encoded UFVK string
+public func deriveUFVKString(
+    seed: Data,
+    coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
+    account: UInt32 = 0,
+    mainnet: Bool = true
+) throws -> String {
+    var output = [UInt8](repeating: 0, count: 512)
+
+    let len = seed.withUnsafeBytes { seedPtr in
+        zsig_derive_ufvk_string(
+            seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+            seed.count,
+            coinType,
+            account,
+            mainnet,
+            &output,
+            512
+        )
+    }
+
+    guard len > 0 else {
+        throw ZcashSignerError(code: UInt32(-len))
+    }
+
+    guard let ufvk = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+        throw ZcashSignerError.invalidKey
+    }
+
+    return ufvk
+}
+
 // MARK: - RNG Callback
 
 /// Callback for SecRandomCopyBytes, passed to Rust library

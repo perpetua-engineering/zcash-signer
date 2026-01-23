@@ -280,6 +280,200 @@ ZsigError zsig_derive_transparent_pubkey_hash(const uint8_t* seed,
                                                uint8_t* hash_out);
 
 /* ============================================================================
+ * Transparent Signing
+ * ============================================================================ */
+
+/*
+ * Sign a transparent input sighash using BIP-44 derived key
+ *
+ * Parameters:
+ *   seed: BIP-39 seed bytes
+ *   seed_len: Length of seed (usually 64)
+ *   derivation_path: BIP-32 derivation path components with hardened bits
+ *   path_len: Number of path components (usually 5)
+ *   sighash: 32-byte sighash to sign
+ *   sighash_type: Sighash type (usually 0x01 for SIGHASH_ALL)
+ *   signature_out: Output buffer for DER signature (at least 72 bytes)
+ *   signature_len_out: Output for actual signature length
+ *   pubkey_out: Output buffer for compressed pubkey (33 bytes)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_sign_transparent(const uint8_t* seed,
+                                 size_t seed_len,
+                                 const uint32_t* derivation_path,
+                                 size_t path_len,
+                                 const uint8_t* sighash,
+                                 uint8_t sighash_type,
+                                 uint8_t* signature_out,
+                                 size_t* signature_len_out,
+                                 uint8_t* pubkey_out);
+
+/* ============================================================================
+ * Orchard Address Types
+ * ============================================================================ */
+
+/*
+ * Orchard payment address (diversifier + pk_d)
+ */
+typedef struct {
+    uint8_t diversifier[11];
+    uint8_t pk_d[32];
+} ZsigOrchardAddress;
+
+/*
+ * Orchard Full Viewing Key components
+ */
+typedef struct {
+    uint8_t ak[32];   /* authorization key */
+    uint8_t nk[32];   /* nullifier deriving key */
+    uint8_t rivk[32]; /* randomized ivk */
+} ZsigOrchardFullViewingKey;
+
+/* ============================================================================
+ * Orchard Address Derivation (ZIP-316)
+ * ============================================================================ */
+
+/*
+ * Derive Orchard address from spending key
+ *
+ * Parameters:
+ *   spending_key: Pointer to 32-byte spending key
+ *   address_out: Pointer to receive the address
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_orchard_address(const uint8_t* spending_key,
+                                       ZsigOrchardAddress* address_out);
+
+/*
+ * Derive Orchard address from seed using ZIP-32
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes
+ *   seed_len: Length of the seed
+ *   coin_type: Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index
+ *   address_out: Pointer to receive the address
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_orchard_address_from_seed(const uint8_t* seed,
+                                                 size_t seed_len,
+                                                 uint32_t coin_type,
+                                                 uint32_t account,
+                                                 ZsigOrchardAddress* address_out);
+
+/* ============================================================================
+ * Unified Address Encoding (ZIP-316)
+ * ============================================================================ */
+
+/*
+ * Encode an Orchard address as a Unified Address string
+ *
+ * Parameters:
+ *   address: Pointer to the Orchard address
+ *   mainnet: true for mainnet (u...), false for testnet (utest...)
+ *   output: Buffer for null-terminated UA string (at least 256 bytes)
+ *   output_len: Size of output buffer
+ *
+ * Returns:
+ *   Length of UA string (excluding null terminator), or 0 on error
+ */
+size_t zsig_encode_unified_address(const ZsigOrchardAddress* address,
+                                    bool mainnet,
+                                    uint8_t* output,
+                                    size_t output_len);
+
+/*
+ * Encode a Unified Address with both Orchard and transparent receivers
+ *
+ * Creates a UA that CEXs can use - they'll send to the transparent receiver
+ * if they don't support Orchard.
+ *
+ * Parameters:
+ *   orchard_addr: Pointer to the Orchard address
+ *   transparent_pkh: Pointer to 20-byte transparent pubkey hash
+ *   mainnet: true for mainnet, false for testnet
+ *   output: Buffer for null-terminated UA string (at least 256 bytes)
+ *   output_len: Size of output buffer
+ *
+ * Returns:
+ *   Length of UA string (excluding null terminator), or 0 on error
+ */
+size_t zsig_encode_unified_address_with_transparent(const ZsigOrchardAddress* orchard_addr,
+                                                     const uint8_t* transparent_pkh,
+                                                     bool mainnet,
+                                                     uint8_t* output,
+                                                     size_t output_len);
+
+/* ============================================================================
+ * Full Viewing Key Derivation (ZIP-316)
+ * ============================================================================ */
+
+/*
+ * Derive Orchard Full Viewing Key from seed
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes
+ *   seed_len: Length of the seed
+ *   coin_type: Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index
+ *   fvk_out: Pointer to receive the FVK
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_orchard_full_viewing_key(const uint8_t* seed,
+                                                size_t seed_len,
+                                                uint32_t coin_type,
+                                                uint32_t account,
+                                                ZsigOrchardFullViewingKey* fvk_out);
+
+/*
+ * Encode an Orchard FVK as a Unified Full Viewing Key string
+ *
+ * Parameters:
+ *   fvk: Pointer to the Orchard FVK
+ *   mainnet: true for mainnet (uview...), false for testnet (uviewtest...)
+ *   output: Buffer for null-terminated UFVK string (at least 512 bytes)
+ *   output_len: Size of output buffer
+ *
+ * Returns:
+ *   Length of UFVK string (excluding null terminator), or 0 on error
+ */
+size_t zsig_encode_unified_full_viewing_key(const ZsigOrchardFullViewingKey* fvk,
+                                             bool mainnet,
+                                             uint8_t* output,
+                                             size_t output_len);
+
+/*
+ * Derive UFVK string directly from seed (convenience function)
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes
+ *   seed_len: Length of the seed
+ *   coin_type: Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index
+ *   mainnet: true for mainnet, false for testnet
+ *   output: Buffer for null-terminated UFVK string (at least 512 bytes)
+ *   output_len: Size of output buffer
+ *
+ * Returns:
+ *   Length of UFVK string (positive), or negative error code on failure
+ */
+int32_t zsig_derive_ufvk_string(const uint8_t* seed,
+                                 size_t seed_len,
+                                 uint32_t coin_type,
+                                 uint32_t account,
+                                 bool mainnet,
+                                 uint8_t* output,
+                                 size_t output_len);
+
+/* ============================================================================
  * Version Info
  * ============================================================================ */
 

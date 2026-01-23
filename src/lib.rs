@@ -4,6 +4,8 @@
 //! - ZIP-32 Orchard key derivation (spending key, ask)
 //! - RedPallas randomized signing for PCZT
 //! - BIP-44 transparent address derivation
+//! - Orchard address derivation and Unified Address encoding (ZIP-316)
+//! - Unified Full Viewing Key (UFVK) derivation and encoding
 //!
 //! # Architecture
 //! - iPhone: Generates zk-SNARK proofs, builds PCZT
@@ -14,13 +16,13 @@
 
 extern crate alloc;
 
+mod address;
 mod keys;
 mod signing;
 mod transparent;
 
-// Used by submodules
-
 // Re-export for FFI
+pub use address::*;
 pub use keys::*;
 pub use signing::*;
 pub use transparent::*;
