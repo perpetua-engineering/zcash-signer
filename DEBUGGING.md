@@ -67,7 +67,62 @@
 1) PCZT contains Orchard `rk` values not derived from the seed/alpha we’re using.
 2) Signature encoding or verification expectations differ between our signer and the SDK/zcashlc.
 
-## Next Diagnostic Steps (Low-Level)
+## RESOLVED - Root Causes Found (2025-01-22)
+
+After extensive debugging, **three distinct bugs** were identified and fixed:
+
+### Bug 1: Re-signing Already-Signed Dummy Spends (OrchardBindingSigMismatch)
+
+**Root Cause**: For shielding transactions (transparent → Orchard), the PCZT contains **dummy Orchard spends**. During IO Finalization (`IoFinalizer::finalize_io()`), these dummy spends are signed with an internal `dummy_sk`, which is then **cleared**.
+
+Our code checked `dummy_sk().is_some()` to detect dummy spends, but this always returned `false` after IO Finalization. We were re-signing already-signed spends with the wrong key (our `ask` vs the internal `dummy_sk`).
+
+**Fix**: Added `alreadySigned` field that checks `spend_auth_sig().is_some()`. Spends that already have signatures are skipped.
+
+**Files Changed**:
+- `zcash-light-client-ffi/rust/src/lib.rs` - Add `already_signed` to JSON output
+- `zcash-swift-wallet-sdk/.../ExternalSignerTypes.swift` - Parse `isAlreadySigned`
+- `pczt-cli/Commands/SignCommand.swift` - Skip already-signed spends
+
+### Bug 2: Missing Sighash Type Byte (SignatureEncoding DER Error)
+
+**Root Cause**: Bitcoin/Zcash P2PKH scriptSig requires: `<DER_signature || sighash_type_byte>`. We were outputting only the DER signature without appending `0x01` (SIGHASH_ALL).
+
+**Fix**: Append sighash_type byte to the DER signature before output.
+
+**File Changed**: `pczt-cli/Commands/SignCommand.swift`
+
+### Bug 3: Double-Hashing the Sighash (ScriptInvalid)
+
+**Root Cause**: The k256 crate's `sign()` method hashes the input with SHA-256 internally. But our sighash is already a 32-byte hash — we were computing `Sign(SHA256(sighash))` instead of `Sign(sighash)`.
+
+**Fix**: Use `sign_prehash()` instead of `sign()` to sign the pre-hashed message directly.
+
+**File Changed**: `src/transparent.rs`
+
+### Successful Broadcast
+
+After these fixes, the complete PCZT shielding workflow works end-to-end:
+
+```
+TxID: 267a2d9eb1f550377cfed5296b7197fa427e476c4951aec2f4db56f413a4addb
+```
+
+## Lessons Learned
+
+1. **IO Finalization has side effects**: It signs dummy spends AND clears `dummy_sk`. Checking `dummy_sk` after finalization is useless.
+
+2. **Bitcoin signature format is tricky**: The sighash_type byte must be appended to the DER signature for scriptSig.
+
+3. **Know your crypto library**: `sign()` vs `sign_prehash()` is a critical distinction when working with pre-hashed messages.
+
+4. **Comprehensive logging is essential**: The diagnostic instrumentation added during debugging (PCZT summaries, sighash comparison, signature comparison) was crucial for isolating each bug.
+
+---
+
+## Historical Notes (Pre-Resolution)
+
+### Next Diagnostic Steps (Low-Level) [COMPLETED]
 1) Extract Orchard `rk` + `alpha` from the PCZT and verify:
    - derive `rk` from seed + `alpha`
    - compare to PCZT `rk`
