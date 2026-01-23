@@ -64,6 +64,7 @@ struct ExtractSighashesCommand: AsyncParsableCommand {
                     randomizer: $0.randomizer.hexString,
                     rk: $0.rk?.hexString,
                     isDummy: $0.isDummy,
+                    isAlreadySigned: $0.isAlreadySigned,
                     zip32Derivation: $0.zip32Derivation.map {
                         Zip32DerivationOutput(
                             seedFingerprint: $0.seedFingerprint.hexString,

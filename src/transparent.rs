@@ -412,7 +412,7 @@ pub unsafe extern "C" fn zsig_sign_transparent(
     }
 
     // Sign the sighash
-    use k256::ecdsa::{SigningKey, signature::Signer};
+    use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 
     let signing_key = match SigningKey::from_slice(&sk) {
         Ok(key) => key,
@@ -425,8 +425,12 @@ pub unsafe extern "C" fn zsig_sign_transparent(
         None => return ZsigError::InvalidKey,
     };
 
-    // Sign - k256 produces a Signature
-    let signature: k256::ecdsa::Signature = signing_key.sign(sighash_slice);
+    // Sign the prehashed sighash - sighash is already a 32-byte hash,
+    // so we use sign_prehash() to avoid double-hashing
+    let signature: k256::ecdsa::Signature = match signing_key.sign_prehash(sighash_slice) {
+        Ok(sig) => sig,
+        Err(_) => return ZsigError::InvalidSignature,
+    };
 
     // Convert to DER format
     let der_sig = signature.to_der();

@@ -39,15 +39,21 @@ bs58 = { version = "0.5", default-features = false, features = ["alloc", "check"
 bip39 = { version = "2", default-features = false, features = ["std"], optional = true }
 orchard = { path = "../orchard-fork", default-features = false, features = ["std"], optional = true }
 zip32 = { version = "0.2.0", default-features = false, optional = true }
+hex = { version = "0.4", optional = true }
 
 [dev-dependencies]
 # For validation against reference implementations
 hex = "0.4"
 
+[[bin]]
+name = "verify_rk"
+path = "src/bin/verify_rk.rs"
+required-features = ["debug-tools"]
+
 [features]
 default = []
 std = []
-debug-tools = ["dep:bip39", "dep:orchard", "dep:zip32", "std"]
+debug-tools = ["dep:bip39", "dep:orchard", "dep:zip32", "dep:hex", "std"]
 
 [profile.release]
 opt-level = "z"      # Optimize for size

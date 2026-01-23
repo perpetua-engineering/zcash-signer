@@ -117,7 +117,16 @@ struct SignCommand: AsyncParsableCommand {
             throw ValidationError("Invalid shielded sighash hex")
         }
 
-        let orchardSpends = try sighashesOutput.orchardSpends.map { spend -> OrchardSpendInfo in
+        // Filter out already-signed spends (e.g., dummy spends signed by IO Finalization)
+        let orchardSpendsToSign = sighashesOutput.orchardSpends.filter { spend in
+            if spend.isAlreadySigned == true {
+                errorOutput("[Sign] Skipping Orchard spend \(spend.index) (already signed)")
+                return false
+            }
+            return true
+        }
+
+        let orchardSpends = try orchardSpendsToSign.map { spend -> OrchardSpendInfo in
             guard let randomizer = Data(hex: spend.randomizer) else {
                 throw ValidationError("Invalid randomizer hex at index \(spend.index)")
             }
@@ -349,8 +358,13 @@ struct SignCommand: AsyncParsableCommand {
             throw LocalSignerError.signingFailed("Transparent signing failed with error \(result)")
         }
 
+        // Bitcoin/Zcash P2PKH scriptSig requires: <DER_sig || sighash_type_byte>
+        // The sighash_type byte must be appended to the DER signature
+        var signatureWithHashType = Data(signatureBuffer.prefix(signatureLen))
+        signatureWithHashType.append(sighashType)
+
         return (
-            signature: Data(signatureBuffer.prefix(signatureLen)),
+            signature: signatureWithHashType,
             publicKey: Data(pubkeyBuffer)
         )
     }

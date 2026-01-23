@@ -188,6 +188,7 @@ struct OrchardSpendOutput: Codable {
     let randomizer: String
     let rk: String?
     let isDummy: Bool?
+    let isAlreadySigned: Bool?
     let zip32Derivation: Zip32DerivationOutput?
     let fvk: String?
 
@@ -196,6 +197,7 @@ struct OrchardSpendOutput: Codable {
         case randomizer
         case rk
         case isDummy = "dummy"
+        case isAlreadySigned = "already_signed"
         case zip32Derivation = "zip32_derivation"
         case fvk
     }
