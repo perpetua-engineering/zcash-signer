@@ -477,8 +477,13 @@ int32_t zsig_derive_ufvk_string(const uint8_t* seed,
  * Combined UFVK (Orchard + Transparent)
  * ============================================================================ */
 
-/* Transparent Full Viewing Key (for combined UFVK) */
+/* Transparent Full Viewing Key (for combined UFVK)
+ * This is a BIP-32 extended public key at the account level (m/44'/133'/account')
+ */
 typedef struct {
+    uint8_t depth;                    /* Depth in derivation path (3 for account level) */
+    uint8_t parent_fingerprint[4];    /* Fingerprint of parent key */
+    uint32_t child_number;            /* Child number with hardened bit */
     uint8_t chain_code[32];
     uint8_t pubkey[33];
 } ZsigTransparentFullViewingKey;

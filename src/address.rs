@@ -76,8 +76,15 @@ pub struct ZsigOrchardFullViewingKey {
 }
 
 /// Transparent Full Viewing Key (for combined UFVK)
+/// This is a BIP-32 extended public key at the account level (m/44'/133'/account')
 #[repr(C)]
 pub struct ZsigTransparentFullViewingKey {
+    /// Depth in the derivation path (3 for account level)
+    pub depth: u8,
+    /// Fingerprint of the parent key (4 bytes)
+    pub parent_fingerprint: [u8; 4],
+    /// Child number with hardened bit (account | 0x80000000)
+    pub child_number: u32,
     /// 32-byte chain code
     pub chain_code: [u8; 32],
     /// 33-byte compressed public key
@@ -900,8 +907,24 @@ pub unsafe extern "C" fn zsig_derive_ufvk_string(
 // Combined UFVK (Orchard + Transparent)
 // -----------------------------------------------------------------------------
 
+/// Compute fingerprint of a public key (first 4 bytes of HASH160)
+fn pubkey_fingerprint(pubkey: &[u8; 33]) -> [u8; 4] {
+    use sha2::{Sha256, Digest as Sha256Digest};
+    use ripemd::{Ripemd160, Digest as RipemdDigest};
+
+    let sha_hash = Sha256::digest(pubkey);
+    let ripe_hash = Ripemd160::digest(&sha_hash);
+
+    let mut fingerprint = [0u8; 4];
+    fingerprint.copy_from_slice(&ripe_hash[..4]);
+    fingerprint
+}
+
 /// Derive transparent Full Viewing Key from seed using BIP-44
 /// Path: m/44'/133'/account'
+///
+/// Returns a full BIP-32 extended public key with depth, parent fingerprint,
+/// child number, chain code, and public key - suitable for UFVK encoding.
 ///
 /// # Safety
 /// - `seed` must point to `seed_len` valid bytes (typically 64 bytes from BIP-39)
@@ -944,8 +967,16 @@ pub unsafe extern "C" fn zsig_derive_transparent_full_viewing_key(
         None => return ZsigError::InvalidKey,
     }
 
+    // Get parent pubkey for fingerprint calculation BEFORE deriving account level
+    let parent_pubkey = match derive_secp256k1_pubkey(&sk) {
+        Some(pk) => pk,
+        None => return ZsigError::InvalidKey,
+    };
+    let parent_fingerprint = pubkey_fingerprint(&parent_pubkey);
+
     // Step 4: Derive m/44'/133'/account'
-    match bip32_derive_hardened(&sk, &chain_code, account | 0x80000000) {
+    let child_number = account | 0x80000000;
+    match bip32_derive_hardened(&sk, &chain_code, child_number) {
         Some((new_sk, new_cc)) => {
             sk = new_sk;
             chain_code = new_cc;
@@ -953,13 +984,16 @@ pub unsafe extern "C" fn zsig_derive_transparent_full_viewing_key(
         None => return ZsigError::InvalidKey,
     }
 
-    // Get compressed public key
+    // Get compressed public key at account level
     let pubkey = match derive_secp256k1_pubkey(&sk) {
         Some(pk) => pk,
         None => return ZsigError::InvalidKey,
     };
 
-    // Write output
+    // Write output - full BIP-32 extended public key format
+    (*fvk_out).depth = 3;  // m/44'/133'/account' = depth 3
+    (*fvk_out).parent_fingerprint = parent_fingerprint;
+    (*fvk_out).child_number = child_number;
     (*fvk_out).chain_code = chain_code;
     (*fvk_out).pubkey = pubkey;
 
@@ -1037,36 +1071,40 @@ pub unsafe extern "C" fn zsig_encode_combined_full_viewing_key(
     // Combined UFVK format (ZIP-316):
     // TLV receivers ordered by typecode ascending
     //
-    // Transparent P2PKH FVK: [0x00] || [65] || chain_code (32) || pubkey (33) = 67 bytes
+    // Transparent P2PKH FVK: [0x00] || [74] || depth (1) || parent_fp (4) || child_num (4) ||
+    //                        chain_code (32) || pubkey (33) = 76 bytes
     // Orchard FVK:           [0x03] || [96] || ak (32) || nk (32) || rivk (32) = 98 bytes
-    // Total TLV: 67 + 98 = 165 bytes
-    // + 16 bytes HRP padding = 181 bytes
+    // Total TLV: 76 + 98 = 174 bytes
+    // + 16 bytes HRP padding = 190 bytes
 
     let hrp = if mainnet { "uview" } else { "uviewtest" };
 
     // Build TLV + padding
-    let mut raw = [0u8; 181];
+    let mut raw = [0u8; 190];
 
-    // Transparent P2PKH FVK (typecode 0x00)
+    // Transparent P2PKH FVK (typecode 0x00) - BIP-32 extended public key format
     raw[0] = 0x00;  // Transparent P2PKH type
-    raw[1] = 65;    // Length: 32 (chain_code) + 33 (pubkey)
-    raw[2..34].copy_from_slice(&fvk_ref.transparent.chain_code);
-    raw[34..67].copy_from_slice(&fvk_ref.transparent.pubkey);
+    raw[1] = 74;    // Length: 1 + 4 + 4 + 32 + 33 = 74 bytes
+    raw[2] = fvk_ref.transparent.depth;
+    raw[3..7].copy_from_slice(&fvk_ref.transparent.parent_fingerprint);
+    raw[7..11].copy_from_slice(&fvk_ref.transparent.child_number.to_be_bytes());
+    raw[11..43].copy_from_slice(&fvk_ref.transparent.chain_code);
+    raw[43..76].copy_from_slice(&fvk_ref.transparent.pubkey);
 
     // Orchard FVK (typecode 0x03)
-    raw[67] = 0x03; // Orchard type
-    raw[68] = 96;   // Length: 32 + 32 + 32
-    raw[69..101].copy_from_slice(&fvk_ref.orchard.ak);
-    raw[101..133].copy_from_slice(&fvk_ref.orchard.nk);
-    raw[133..165].copy_from_slice(&fvk_ref.orchard.rivk);
+    raw[76] = 0x03; // Orchard type
+    raw[77] = 96;   // Length: 32 + 32 + 32
+    raw[78..110].copy_from_slice(&fvk_ref.orchard.ak);
+    raw[110..142].copy_from_slice(&fvk_ref.orchard.nk);
+    raw[142..174].copy_from_slice(&fvk_ref.orchard.rivk);
 
     // Append HRP right-padded with zeros to 16 bytes
     let hrp_bytes = hrp.as_bytes();
-    raw[165..165 + hrp_bytes.len()].copy_from_slice(hrp_bytes);
-    // Remaining bytes [165+hrp_len..181] are already zeros
+    raw[174..174 + hrp_bytes.len()].copy_from_slice(hrp_bytes);
+    // Remaining bytes [174+hrp_len..190] are already zeros
 
     // Apply F4Jumble
-    let mut jumbled = [0u8; 181];
+    let mut jumbled = [0u8; 190];
     if !f4_jumble(&raw, &mut jumbled) {
         return 0;
     }
@@ -1124,6 +1162,9 @@ pub unsafe extern "C" fn zsig_derive_combined_ufvk_string(
             rivk: [0u8; 32],
         },
         transparent: ZsigTransparentFullViewingKey {
+            depth: 0,
+            parent_fingerprint: [0u8; 4],
+            child_number: 0,
             chain_code: [0u8; 32],
             pubkey: [0u8; 33],
         },
