@@ -575,6 +575,33 @@ int32_t zsig_derive_combined_ufvk_string(const uint8_t* seed,
                                           size_t output_len);
 
 /* ============================================================================
+ * Utility Functions
+ * ============================================================================ */
+
+/*
+ * BLAKE2b hash with 16-byte personalization
+ *
+ * Generic BLAKE2b hash function for F4Jumble decoding and other purposes.
+ *
+ * Parameters:
+ *   personal: 16-byte personalization string
+ *   personal_len: Must be 16
+ *   data: Input data to hash
+ *   data_len: Length of input data
+ *   output: Output buffer for hash
+ *   output_len: Desired output length (1-64)
+ *
+ * Returns:
+ *   0 on success, -1 on error
+ */
+int32_t zsig_blake2b_personal(const uint8_t* personal,
+                               size_t personal_len,
+                               const uint8_t* data,
+                               size_t data_len,
+                               uint8_t* output,
+                               size_t output_len);
+
+/* ============================================================================
  * Version Info
  * ============================================================================ */
 
