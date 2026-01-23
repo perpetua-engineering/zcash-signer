@@ -661,6 +661,148 @@ public func deriveUFVKString(
     return ufvk
 }
 
+// MARK: - Combined UFVK (Orchard + Transparent)
+
+/// Combined Full Viewing Key (Orchard + Transparent)
+public struct ZcashCombinedFullViewingKey {
+    /// Orchard FVK components
+    public let orchard: ZcashOrchardFullViewingKey
+    /// Transparent chain code (32 bytes)
+    public let transparentChainCode: Data
+    /// Transparent compressed pubkey (33 bytes)
+    public let transparentPubkey: Data
+
+    public init(orchard: ZcashOrchardFullViewingKey, transparentChainCode: Data, transparentPubkey: Data) throws {
+        guard transparentChainCode.count == 32, transparentPubkey.count == 33 else {
+            throw ZcashSignerError.invalidKey
+        }
+        self.orchard = orchard
+        self.transparentChainCode = transparentChainCode
+        self.transparentPubkey = transparentPubkey
+    }
+
+    /// Derive a combined FVK from a BIP-39 seed
+    ///
+    /// - Parameters:
+    ///   - seed: The BIP-39 seed (typically 64 bytes)
+    ///   - coinType: Coin type for derivation (default: 133 for mainnet)
+    ///   - account: Account index (default: 0)
+    /// - Returns: The derived combined FVK
+    public static func deriveFromSeed(
+        _ seed: Data,
+        coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
+        account: UInt32 = 0
+    ) throws -> ZcashCombinedFullViewingKey {
+        var fvk = ZsigCombinedFullViewingKey()
+
+        let result = seed.withUnsafeBytes { seedPtr in
+            zsig_derive_combined_full_viewing_key(
+                seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                seed.count,
+                coinType,
+                account,
+                &fvk
+            )
+        }
+
+        guard result.rawValue == 0 else {
+            throw ZcashSignerError(code: result.rawValue)
+        }
+
+        let orchardFvk = try ZcashOrchardFullViewingKey(
+            ak: Data(bytes: &fvk.orchard.ak, count: 32),
+            nk: Data(bytes: &fvk.orchard.nk, count: 32),
+            rivk: Data(bytes: &fvk.orchard.rivk, count: 32)
+        )
+
+        return try ZcashCombinedFullViewingKey(
+            orchard: orchardFvk,
+            transparentChainCode: Data(bytes: &fvk.transparent.chain_code, count: 32),
+            transparentPubkey: Data(bytes: &fvk.transparent.pubkey, count: 33)
+        )
+    }
+
+    /// Encode as a Unified Full Viewing Key string
+    ///
+    /// - Parameter mainnet: true for mainnet (uview...), false for testnet (uviewtest...)
+    /// - Returns: The encoded UFVK string
+    public func encodeUFVK(mainnet: Bool = true) throws -> String {
+        var fvk = ZsigCombinedFullViewingKey()
+        orchard.ak.withUnsafeBytes { ptr in
+            _ = memcpy(&fvk.orchard.ak, ptr.baseAddress!, 32)
+        }
+        orchard.nk.withUnsafeBytes { ptr in
+            _ = memcpy(&fvk.orchard.nk, ptr.baseAddress!, 32)
+        }
+        orchard.rivk.withUnsafeBytes { ptr in
+            _ = memcpy(&fvk.orchard.rivk, ptr.baseAddress!, 32)
+        }
+        transparentChainCode.withUnsafeBytes { ptr in
+            _ = memcpy(&fvk.transparent.chain_code, ptr.baseAddress!, 32)
+        }
+        transparentPubkey.withUnsafeBytes { ptr in
+            _ = memcpy(&fvk.transparent.pubkey, ptr.baseAddress!, 33)
+        }
+
+        var output = [UInt8](repeating: 0, count: 512)
+
+        let len = zsig_encode_combined_full_viewing_key(&fvk, mainnet, &output, 512)
+
+        guard len > 0 else {
+            throw ZcashSignerError.bufferTooSmall
+        }
+
+        guard let ufvk = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+            throw ZcashSignerError.invalidKey
+        }
+
+        return ufvk
+    }
+}
+
+/// Derive Combined UFVK string directly from seed (convenience function)
+///
+/// This is the recommended function for deriving a UFVK that includes both
+/// Orchard and transparent receivers, enabling full balance viewing in wallets
+/// like Zashi.
+///
+/// - Parameters:
+///   - seed: The BIP-39 seed (typically 64 bytes)
+///   - coinType: Coin type for derivation (default: 133 for mainnet)
+///   - account: Account index (default: 0)
+///   - mainnet: true for mainnet, false for testnet
+/// - Returns: The encoded combined UFVK string
+public func deriveCombinedUFVKString(
+    seed: Data,
+    coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
+    account: UInt32 = 0,
+    mainnet: Bool = true
+) throws -> String {
+    var output = [UInt8](repeating: 0, count: 512)
+
+    let len = seed.withUnsafeBytes { seedPtr in
+        zsig_derive_combined_ufvk_string(
+            seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+            seed.count,
+            coinType,
+            account,
+            mainnet,
+            &output,
+            512
+        )
+    }
+
+    guard len > 0 else {
+        throw ZcashSignerError(code: UInt32(-len))
+    }
+
+    guard let ufvk = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+        throw ZcashSignerError.invalidKey
+    }
+
+    return ufvk
+}
+
 // MARK: - RNG Callback
 
 /// Callback for SecRandomCopyBytes, passed to Rust library

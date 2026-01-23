@@ -15,6 +15,11 @@ use pasta_curves::pallas;
 use pasta_curves::arithmetic::CurveExt;
 use group::GroupEncoding;
 use sinsemilla::CommitDomain;
+use hmac::{Hmac, Mac};
+use sha2::Sha512;
+use k256::{Scalar, SecretKey, elliptic_curve::sec1::ToEncodedPoint};
+
+type HmacSha512 = Hmac<Sha512>;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -129,6 +134,84 @@ fn to_base(bytes: &[u8; 64]) -> pallas::Base {
 /// Convert 64 bytes to Pallas scalar (mod r)
 fn to_scalar(bytes: &[u8; 64]) -> pallas::Scalar {
     pallas::Scalar::from_uniform_bytes(bytes)
+}
+
+// -----------------------------------------------------------------------------
+// BIP-32 Helper Functions (for Transparent FVK derivation)
+// -----------------------------------------------------------------------------
+
+/// Derive BIP-32 master key from seed
+fn bip32_master_key(seed: &[u8]) -> ([u8; 32], [u8; 32]) {
+    let mut mac = HmacSha512::new_from_slice(b"Bitcoin seed")
+        .expect("HMAC can take key of any size");
+    mac.update(seed);
+    let result = mac.finalize().into_bytes();
+
+    let mut sk = [0u8; 32];
+    let mut chain_code = [0u8; 32];
+    sk.copy_from_slice(&result[..32]);
+    chain_code.copy_from_slice(&result[32..64]);
+    (sk, chain_code)
+}
+
+/// Derive secp256k1 public key (compressed, 33 bytes)
+fn derive_secp256k1_pubkey(sk: &[u8; 32]) -> Option<[u8; 33]> {
+    let secret_key = SecretKey::from_slice(sk).ok()?;
+    let public_key = secret_key.public_key();
+    let point = public_key.to_encoded_point(true); // compressed
+    let bytes = point.as_bytes();
+
+    if bytes.len() != 33 {
+        return None;
+    }
+
+    let mut result = [0u8; 33];
+    result.copy_from_slice(bytes);
+    Some(result)
+}
+
+/// BIP-32 hardened child derivation
+/// index should already have the hardened bit set (0x80000000)
+fn bip32_derive_hardened(
+    parent_sk: &[u8; 32],
+    parent_chain_code: &[u8; 32],
+    index: u32,
+) -> Option<([u8; 32], [u8; 32])> {
+    // For hardened derivation: HMAC-SHA512(chain_code, 0x00 || parent_sk || index)
+    let mut mac = HmacSha512::new_from_slice(parent_chain_code).ok()?;
+    mac.update(&[0x00]);
+    mac.update(parent_sk);
+    mac.update(&index.to_be_bytes());
+    let result = mac.finalize().into_bytes();
+
+    // Parse left 32 bytes as scalar and add to parent key
+    let il: [u8; 32] = result[..32].try_into().ok()?;
+
+    // Convert to scalars and add
+    let parent_scalar_opt = Scalar::from_repr((*parent_sk).into());
+    if parent_scalar_opt.is_none().into() {
+        return None;
+    }
+    let parent_scalar = parent_scalar_opt.unwrap();
+
+    let il_scalar_opt = Scalar::from_repr(il.into());
+    if il_scalar_opt.is_none().into() {
+        return None;
+    }
+    let il_scalar = il_scalar_opt.unwrap();
+
+    let child_scalar = parent_scalar + il_scalar;
+    if child_scalar.is_zero().into() {
+        return None; // Invalid key
+    }
+
+    let mut child_sk = [0u8; 32];
+    child_sk.copy_from_slice(&child_scalar.to_bytes());
+
+    let mut child_chain_code = [0u8; 32];
+    child_chain_code.copy_from_slice(&result[32..64]);
+
+    Some((child_sk, child_chain_code))
 }
 
 /// F4Jumble - ZIP-316 address encoding scramble
@@ -805,6 +888,260 @@ pub unsafe extern "C" fn zsig_derive_ufvk_string(
     }
 
     let len = zsig_encode_unified_full_viewing_key(&fvk, mainnet, output, output_len);
+
+    if len == 0 {
+        return -100; // Encoding failed
+    }
+
+    len as i32
+}
+
+// -----------------------------------------------------------------------------
+// Combined UFVK (Orchard + Transparent)
+// -----------------------------------------------------------------------------
+
+/// Derive transparent Full Viewing Key from seed using BIP-44
+/// Path: m/44'/133'/account'
+///
+/// # Safety
+/// - `seed` must point to `seed_len` valid bytes (typically 64 bytes from BIP-39)
+/// - `fvk_out` must point to valid memory for a ZsigTransparentFullViewingKey
+#[no_mangle]
+pub unsafe extern "C" fn zsig_derive_transparent_full_viewing_key(
+    seed: *const u8,
+    seed_len: usize,
+    account: u32,
+    fvk_out: *mut ZsigTransparentFullViewingKey,
+) -> ZsigError {
+    if seed.is_null() || fvk_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+
+    if seed_len < 16 || seed_len > 64 {
+        return ZsigError::InvalidSeed;
+    }
+
+    let seed_slice = slice::from_raw_parts(seed, seed_len);
+
+    // Step 1: Master key from seed
+    let (mut sk, mut chain_code) = bip32_master_key(seed_slice);
+
+    // Step 2: Derive m/44' (purpose)
+    match bip32_derive_hardened(&sk, &chain_code, 44 | 0x80000000) {
+        Some((new_sk, new_cc)) => {
+            sk = new_sk;
+            chain_code = new_cc;
+        }
+        None => return ZsigError::InvalidKey,
+    }
+
+    // Step 3: Derive m/44'/133' (coin type = Zcash)
+    match bip32_derive_hardened(&sk, &chain_code, 133 | 0x80000000) {
+        Some((new_sk, new_cc)) => {
+            sk = new_sk;
+            chain_code = new_cc;
+        }
+        None => return ZsigError::InvalidKey,
+    }
+
+    // Step 4: Derive m/44'/133'/account'
+    match bip32_derive_hardened(&sk, &chain_code, account | 0x80000000) {
+        Some((new_sk, new_cc)) => {
+            sk = new_sk;
+            chain_code = new_cc;
+        }
+        None => return ZsigError::InvalidKey,
+    }
+
+    // Get compressed public key
+    let pubkey = match derive_secp256k1_pubkey(&sk) {
+        Some(pk) => pk,
+        None => return ZsigError::InvalidKey,
+    };
+
+    // Write output
+    (*fvk_out).chain_code = chain_code;
+    (*fvk_out).pubkey = pubkey;
+
+    ZsigError::Success
+}
+
+/// Derive combined Full Viewing Key (Orchard + Transparent) from seed
+///
+/// # Safety
+/// - `seed` must point to `seed_len` valid bytes
+/// - `fvk_out` must point to valid memory for a ZsigCombinedFullViewingKey
+#[no_mangle]
+pub unsafe extern "C" fn zsig_derive_combined_full_viewing_key(
+    seed: *const u8,
+    seed_len: usize,
+    coin_type: u32,
+    account: u32,
+    fvk_out: *mut ZsigCombinedFullViewingKey,
+) -> ZsigError {
+    if seed.is_null() || fvk_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+
+    // Derive Orchard FVK
+    let orchard_result = zsig_derive_orchard_full_viewing_key(
+        seed,
+        seed_len,
+        coin_type,
+        account,
+        &mut (*fvk_out).orchard,
+    );
+    if orchard_result as i32 != 0 {
+        return orchard_result;
+    }
+
+    // Derive Transparent FVK
+    let transparent_result = zsig_derive_transparent_full_viewing_key(
+        seed,
+        seed_len,
+        account,
+        &mut (*fvk_out).transparent,
+    );
+    if transparent_result as i32 != 0 {
+        return transparent_result;
+    }
+
+    ZsigError::Success
+}
+
+/// Encode a Combined Full Viewing Key as a Unified Full Viewing Key string
+///
+/// This creates a UFVK with both transparent (P2PKH) and Orchard receivers.
+/// Per ZIP-316, receivers are ordered by typecode ascending.
+///
+/// Returns the length of the encoded string (excluding null terminator),
+/// or 0 on error. The output buffer must be at least 512 bytes.
+///
+/// # Safety
+/// - `fvk` must point to a valid ZsigCombinedFullViewingKey
+/// - `output` must point to a buffer of at least `output_len` bytes
+/// - `output_len` must be at least 512
+#[no_mangle]
+pub unsafe extern "C" fn zsig_encode_combined_full_viewing_key(
+    fvk: *const ZsigCombinedFullViewingKey,
+    mainnet: bool,
+    output: *mut u8,
+    output_len: usize,
+) -> usize {
+    if fvk.is_null() || output.is_null() || output_len < 512 {
+        return 0;
+    }
+
+    let fvk_ref = &*fvk;
+
+    // Combined UFVK format (ZIP-316):
+    // TLV receivers ordered by typecode ascending
+    //
+    // Transparent P2PKH FVK: [0x00] || [65] || chain_code (32) || pubkey (33) = 67 bytes
+    // Orchard FVK:           [0x03] || [96] || ak (32) || nk (32) || rivk (32) = 98 bytes
+    // Total TLV: 67 + 98 = 165 bytes
+    // + 16 bytes HRP padding = 181 bytes
+
+    let hrp = if mainnet { "uview" } else { "uviewtest" };
+
+    // Build TLV + padding
+    let mut raw = [0u8; 181];
+
+    // Transparent P2PKH FVK (typecode 0x00)
+    raw[0] = 0x00;  // Transparent P2PKH type
+    raw[1] = 65;    // Length: 32 (chain_code) + 33 (pubkey)
+    raw[2..34].copy_from_slice(&fvk_ref.transparent.chain_code);
+    raw[34..67].copy_from_slice(&fvk_ref.transparent.pubkey);
+
+    // Orchard FVK (typecode 0x03)
+    raw[67] = 0x03; // Orchard type
+    raw[68] = 96;   // Length: 32 + 32 + 32
+    raw[69..101].copy_from_slice(&fvk_ref.orchard.ak);
+    raw[101..133].copy_from_slice(&fvk_ref.orchard.nk);
+    raw[133..165].copy_from_slice(&fvk_ref.orchard.rivk);
+
+    // Append HRP right-padded with zeros to 16 bytes
+    let hrp_bytes = hrp.as_bytes();
+    raw[165..165 + hrp_bytes.len()].copy_from_slice(hrp_bytes);
+    // Remaining bytes [165+hrp_len..181] are already zeros
+
+    // Apply F4Jumble
+    let mut jumbled = [0u8; 181];
+    if !f4_jumble(&raw, &mut jumbled) {
+        return 0;
+    }
+
+    // Convert to 5-bit groups for Bech32m
+    let data_5bit = to_5bit_groups(&jumbled);
+
+    // Build the Bech32m string
+    let encoded = match bech32_encode(hrp, &data_5bit) {
+        Some(s) => s,
+        None => return 0,
+    };
+
+    let len = encoded.len();
+    if len >= output_len {
+        return 0;
+    }
+
+    let output_slice = slice::from_raw_parts_mut(output, len + 1);
+    output_slice[..len].copy_from_slice(encoded.as_bytes());
+    output_slice[len] = 0; // Null terminator
+
+    len
+}
+
+/// Derive Combined UFVK from seed as a bech32m string
+///
+/// Convenience function that combines derivation and encoding.
+/// Returns the length of the encoded string (excluding null terminator),
+/// or negative error code on failure.
+///
+/// # Safety
+/// - `seed` must point to `seed_len` valid bytes
+/// - `output` must point to a buffer of at least `output_len` bytes
+/// - `output_len` must be at least 512
+#[no_mangle]
+pub unsafe extern "C" fn zsig_derive_combined_ufvk_string(
+    seed: *const u8,
+    seed_len: usize,
+    coin_type: u32,
+    account: u32,
+    mainnet: bool,
+    output: *mut u8,
+    output_len: usize,
+) -> i32 {
+    if seed.is_null() || output.is_null() || output_len < 512 {
+        return -1;
+    }
+
+    // Derive combined FVK
+    let mut fvk = ZsigCombinedFullViewingKey {
+        orchard: ZsigOrchardFullViewingKey {
+            ak: [0u8; 32],
+            nk: [0u8; 32],
+            rivk: [0u8; 32],
+        },
+        transparent: ZsigTransparentFullViewingKey {
+            chain_code: [0u8; 32],
+            pubkey: [0u8; 33],
+        },
+    };
+
+    let result = zsig_derive_combined_full_viewing_key(
+        seed,
+        seed_len,
+        coin_type,
+        account,
+        &mut fvk,
+    );
+
+    if result as i32 != 0 {
+        return -(result as i32);
+    }
+
+    let len = zsig_encode_combined_full_viewing_key(&fvk, mainnet, output, output_len);
 
     if len == 0 {
         return -100; // Encoding failed

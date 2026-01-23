@@ -474,6 +474,102 @@ int32_t zsig_derive_ufvk_string(const uint8_t* seed,
                                  size_t output_len);
 
 /* ============================================================================
+ * Combined UFVK (Orchard + Transparent)
+ * ============================================================================ */
+
+/* Transparent Full Viewing Key (for combined UFVK) */
+typedef struct {
+    uint8_t chain_code[32];
+    uint8_t pubkey[33];
+} ZsigTransparentFullViewingKey;
+
+/* Combined Full Viewing Key (Orchard + Transparent) */
+typedef struct {
+    ZsigOrchardFullViewingKey orchard;
+    ZsigTransparentFullViewingKey transparent;
+} ZsigCombinedFullViewingKey;
+
+/*
+ * Derive transparent Full Viewing Key from seed using BIP-44
+ * Path: m/44'/133'/account'
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes
+ *   seed_len: Length of the seed (typically 64)
+ *   account: Account index
+ *   fvk_out: Output FVK (chain_code + compressed pubkey)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code otherwise
+ */
+ZsigError zsig_derive_transparent_full_viewing_key(const uint8_t* seed,
+                                                    size_t seed_len,
+                                                    uint32_t account,
+                                                    ZsigTransparentFullViewingKey* fvk_out);
+
+/*
+ * Derive combined Full Viewing Key (Orchard + Transparent) from seed
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes
+ *   seed_len: Length of the seed
+ *   coin_type: Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index
+ *   fvk_out: Output combined FVK
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code otherwise
+ */
+ZsigError zsig_derive_combined_full_viewing_key(const uint8_t* seed,
+                                                 size_t seed_len,
+                                                 uint32_t coin_type,
+                                                 uint32_t account,
+                                                 ZsigCombinedFullViewingKey* fvk_out);
+
+/*
+ * Encode a Combined Full Viewing Key as a Unified Full Viewing Key string
+ *
+ * Creates a UFVK with both transparent (P2PKH) and Orchard receivers.
+ * Per ZIP-316, receivers are ordered by typecode ascending.
+ *
+ * Parameters:
+ *   fvk: The combined FVK to encode
+ *   mainnet: true for mainnet (uview...), false for testnet (uviewtest...)
+ *   output: Buffer for null-terminated UFVK string (at least 512 bytes)
+ *   output_len: Size of output buffer
+ *
+ * Returns:
+ *   Length of UFVK string (excluding null terminator), or 0 on error
+ */
+size_t zsig_encode_combined_full_viewing_key(const ZsigCombinedFullViewingKey* fvk,
+                                              bool mainnet,
+                                              uint8_t* output,
+                                              size_t output_len);
+
+/*
+ * Derive Combined UFVK string directly from seed (convenience function)
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes
+ *   seed_len: Length of the seed
+ *   coin_type: Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index
+ *   mainnet: true for mainnet, false for testnet
+ *   output: Buffer for null-terminated UFVK string (at least 512 bytes)
+ *   output_len: Size of output buffer
+ *
+ * Returns:
+ *   Length of UFVK string (positive), or negative error code on failure
+ */
+int32_t zsig_derive_combined_ufvk_string(const uint8_t* seed,
+                                          size_t seed_len,
+                                          uint32_t coin_type,
+                                          uint32_t account,
+                                          bool mainnet,
+                                          uint8_t* output,
+                                          size_t output_len);
+
+/* ============================================================================
  * Version Info
  * ============================================================================ */
 
