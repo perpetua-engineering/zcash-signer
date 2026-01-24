@@ -8,7 +8,7 @@
 
 import Foundation
 import Security
-@_implementationOnly import CZcashSigner
+@_implementationOnly import ZcashSigner
 
 // MARK: - Error Types
 

@@ -1,22 +1,18 @@
 // swift-tools-version:5.9
 import PackageDescription
 
-// ARCHITECTURE NOTE:
-// ==================
-// This package provides C headers and Swift wrapper. The actual libzcash_signer.a
-// library linking is configured in the Xcode project's build settings with
-// SDK-conditional LIBRARY_SEARCH_PATHS:
+// ARCHITECTURE:
+// =============
+// This package wraps a pre-built Rust library (libzcash_signer) as an xcframework.
+// The xcframework is built by build-xcframework.sh and copied to Vendor/.
 //
-//   LIBRARY_SEARCH_PATHS[sdk=watchos*] = $(PROJECT_DIR)/zcash-signer/target/watchos-device-universal
-//   LIBRARY_SEARCH_PATHS[sdk=watchsimulator*] = $(PROJECT_DIR)/zcash-signer/target/watchos-sim-universal
+// Build flow:
+//   1. Run ./build-xcframework.sh to compile Rust for all platforms
+//   2. Script creates Vendor/ZcashSigner.xcframework
+//   3. SPM uses the xcframework as a binary target
 //
-// We cannot use SPM's linkerSettings because:
-// 1. SPM evaluates Package.swift at resolution time, not build time
-// 2. .when(platforms:) only distinguishes platforms, not device vs simulator
-// 3. binaryTarget with xcframework causes modulemap conflicts with WalletCore.xcframework
-
-let zcashSignerPath = "./target"
-let macOSLibPath = "\(zcashSignerPath)/macos-universal"
+// This approach follows WalletCoreSPM's pattern and eliminates the need for
+// manual LIBRARY_SEARCH_PATHS configuration in consuming Xcode projects.
 
 let package = Package(
     name: "ZcashSigner",
@@ -27,44 +23,24 @@ let package = Package(
     ],
     products: [
         .library(
-            name: "ZcashSignerLocal",
+            name: "ZcashSignerCore",
             targets: ["ZcashSignerCore"]
         ),
-        .executable(
-            name: "pczt-cli",
-            targets: ["pczt-cli"]
-        ),
     ],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
-        .package(path: "../zcash-swift-wallet-sdk"),
-    ],
+    dependencies: [],
     targets: [
-        // C header declarations - library path comes from Xcode build settings
-        .target(
-            name: "CZcashSigner",
-            path: "Sources/CZcashSigner",
-            linkerSettings: [
-                .linkedLibrary("zcash_signer"),
-                // macOS path for tests (watchOS/iOS paths in Xcode project settings)
-                .unsafeFlags(["-L\(macOSLibPath)"], .when(platforms: [.macOS])),
-            ]
+        // Pre-built Rust library as xcframework
+        // Contains libzcash_signer.a + headers for all Apple platforms
+        .binaryTarget(
+            name: "ZcashSigner",
+            path: "Vendor/ZcashSigner.xcframework"
         ),
-        // Swift wrapper
+
+        // Swift wrapper providing safe, idiomatic API
         .target(
             name: "ZcashSignerCore",
-            dependencies: ["CZcashSigner"],
+            dependencies: ["ZcashSigner"],
             path: "Sources/ZcashSignerSwift"
-        ),
-        // PCZT CLI tool
-        .executableTarget(
-            name: "pczt-cli",
-            dependencies: [
-                "ZcashSignerCore",
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
-                .product(name: "ZcashLightClientKit", package: "zcash-swift-wallet-sdk"),
-            ],
-            path: "pczt-cli"
         ),
     ]
 )

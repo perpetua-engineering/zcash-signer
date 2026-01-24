@@ -122,14 +122,16 @@ echo "Created macos-universal/libzcash_signer.a"
 echo ""
 echo "==> Staging headers..."
 rm -rf "$HEADER_DIR"
-mkdir -p "$HEADER_DIR"
+# Use unique subdirectory to avoid modulemap collision with other xcframeworks
+# See: https://forums.swift.org/t/how-to-solve-multiple-commands-produce-module-modulemap/67187
+mkdir -p "$HEADER_DIR/ZcashSigner"
 
-# Copy header
-cp "$SCRIPT_DIR/include/zcash_signer.h" "$HEADER_DIR/"
+# Copy header into unique subdirectory
+cp "$SCRIPT_DIR/include/zcash_signer.h" "$HEADER_DIR/ZcashSigner/"
 
-# Create modulemap
-cat > "$HEADER_DIR/module.modulemap" << 'EOF'
-module ZcashSignerLib {
+# Create modulemap in the same subdirectory
+cat > "$HEADER_DIR/ZcashSigner/module.modulemap" << 'EOF'
+module ZcashSigner {
     header "zcash_signer.h"
     export *
 }
@@ -173,4 +175,11 @@ echo "==> Exported symbols (sample):"
 nm -g "$BUILD_DIR/aarch64-apple-watchos/release/libzcash_signer.a" 2>/dev/null | grep " T _zsig_" | head -5
 
 echo ""
-echo "Done! XCFramework created at: $XCFRAMEWORK_DIR"
+echo "==> Copying to Vendor/ for SPM..."
+mkdir -p "$SCRIPT_DIR/Vendor"
+rm -rf "$SCRIPT_DIR/Vendor/ZcashSigner.xcframework"
+cp -R "$XCFRAMEWORK_DIR" "$SCRIPT_DIR/Vendor/"
+echo "Copied to Vendor/ZcashSigner.xcframework"
+
+echo ""
+echo "Done! XCFramework ready for SPM at: Vendor/ZcashSigner.xcframework"
