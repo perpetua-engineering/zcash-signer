@@ -172,7 +172,7 @@ ls -la "$XCFRAMEWORK_DIR"
 
 echo ""
 echo "==> Exported symbols (sample):"
-nm -g "$BUILD_DIR/aarch64-apple-watchos/release/libzcash_signer.a" 2>/dev/null | grep " T _zsig_" | head -5
+nm -g "$BUILD_DIR/aarch64-apple-watchos/release/libzcash_signer.a" 2>/dev/null | grep " T _zsig_" | head -5 || echo "(none found)"
 
 echo ""
 echo "==> Copying to vendor/ for SPM..."
