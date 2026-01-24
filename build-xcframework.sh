@@ -34,7 +34,13 @@ BUILD_DIR="$SCRIPT_DIR/target"
 XCFRAMEWORK_DIR="$SCRIPT_DIR/ZcashSigner.xcframework"
 HEADER_DIR="$BUILD_DIR/headers"
 
+# Deployment targets - must match app's deployment targets
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+export WATCHOS_DEPLOYMENT_TARGET="${WATCHOS_DEPLOYMENT_TARGET:-10.0}"
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+
 echo "Building ZcashSigner for Apple platforms..."
+echo "Deployment targets: iOS=$IPHONEOS_DEPLOYMENT_TARGET, watchOS=$WATCHOS_DEPLOYMENT_TARGET, macOS=$MACOSX_DEPLOYMENT_TARGET"
 echo ""
 
 # Build a tier-3 target (requires -Z build-std)
