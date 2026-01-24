@@ -27,6 +27,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Remap paths to avoid embedding user home directory in debug info
+export RUSTFLAGS="--remap-path-prefix=$HOME=~ --remap-path-prefix=$SCRIPT_DIR=."
+
 BUILD_DIR="$SCRIPT_DIR/target"
 XCFRAMEWORK_DIR="$SCRIPT_DIR/ZcashSigner.xcframework"
 HEADER_DIR="$BUILD_DIR/headers"
