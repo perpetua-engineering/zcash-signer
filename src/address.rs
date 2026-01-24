@@ -18,6 +18,8 @@ use sinsemilla::CommitDomain;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 use k256::{Scalar, SecretKey, elliptic_curve::sec1::ToEncodedPoint};
+use jubjub::{Fr as JubjubScalar, ExtendedPoint as JubjubPoint, AffinePoint as JubjubAffine};
+use reddsa::sapling::SpendAuth as SaplingSpendAuth;
 
 type HmacSha512 = Hmac<Sha512>;
 
@@ -33,6 +35,11 @@ const ORCHARD_ASK: u8 = 0x06;
 const ORCHARD_NK: u8 = 0x07;
 const ORCHARD_RIVK: u8 = 0x08;
 const ORCHARD_DK_OVK: u8 = 0x82;
+
+/// Domain separators for Sapling key derivation
+const SAPLING_ASK: u8 = 0x00;
+const SAPLING_NSK: u8 = 0x01;
+const SAPLING_OVK: u8 = 0x02;
 
 /// Sinsemilla domain for commit_ivk
 const COMMIT_IVK_PERSONALIZATION: &str = "z.cash:Orchard-CommitIvk";
@@ -86,11 +93,26 @@ pub struct ZsigTransparentFullViewingKey {
     pub pubkey: [u8; 33],
 }
 
-/// Combined Full Viewing Key (Orchard + Transparent)
+/// Sapling Full Viewing Key components
+/// ZIP-316 format: ak (32) + nk (32) + ovk (32) + dk (32) = 128 bytes
+#[repr(C)]
+pub struct ZsigSaplingFullViewingKey {
+    /// 32-byte authorization key (ak)
+    pub ak: [u8; 32],
+    /// 32-byte nullifier deriving key (nk)
+    pub nk: [u8; 32],
+    /// 32-byte outgoing viewing key (ovk)
+    pub ovk: [u8; 32],
+    /// 32-byte diversifier key (dk)
+    pub dk: [u8; 32],
+}
+
+/// Combined Full Viewing Key (Transparent + Sapling + Orchard)
 #[repr(C)]
 pub struct ZsigCombinedFullViewingKey {
-    pub orchard: ZsigOrchardFullViewingKey,
     pub transparent: ZsigTransparentFullViewingKey,
+    pub sapling: ZsigSaplingFullViewingKey,
+    pub orchard: ZsigOrchardFullViewingKey,
 }
 
 // -----------------------------------------------------------------------------
@@ -407,6 +429,62 @@ fn derive_orchard_child(sk: &mut [u8; 32], chain_code: &mut [u8; 32], index: u32
     let child = blake2b_personal(PRF_EXPAND_PERSONALIZATION, &input);
     sk.copy_from_slice(&child[..32]);
     chain_code.copy_from_slice(&child[32..64]);
+}
+
+/// Derive a hardened Sapling child key using ZIP-32 CKDh
+fn derive_sapling_child(sk: &mut [u8; 32], chain_code: &mut [u8; 32], index: u32) {
+    let index_le = index.to_le_bytes();
+
+    // Build PRF^expand input: c_par || 0x11 || sk || i_le
+    let mut input = [0u8; 32 + 1 + 32 + 4]; // 69 bytes
+    input[..32].copy_from_slice(chain_code);
+    input[32] = 0x11; // SAPLING_ZIP32_CHILD domain separator
+    input[33..65].copy_from_slice(sk);
+    input[65..69].copy_from_slice(&index_le);
+
+    let child = blake2b_personal(PRF_EXPAND_PERSONALIZATION, &input);
+    sk.copy_from_slice(&child[..32]);
+    chain_code.copy_from_slice(&child[32..64]);
+}
+
+/// Convert 64 bytes to Jubjub scalar (mod r)
+fn to_jubjub_scalar(bytes: &[u8; 64]) -> JubjubScalar {
+    JubjubScalar::from_bytes_wide(bytes)
+}
+
+/// Sapling SpendAuth basepoint on Jubjub curve
+/// This is SPENDING_KEY_GENERATOR from the Zcash protocol spec (group_hash("Zcash_G_", ""))
+/// Extracted from reddsa crate constants.rs
+const SAPLING_SPENDING_KEY_GENERATOR: [u8; 32] = [
+    48, 181, 242, 170, 173, 50, 86, 48, 188, 221, 219, 206, 77, 103, 101, 109, 5, 253, 28, 194,
+    208, 55, 187, 83, 117, 182, 233, 109, 158, 1, 161, 215,
+];
+
+/// Sapling Nullifier proving key basepoint (PROOF_GENERATION_KEY_GENERATOR)
+/// This is H = group_hash("Zcash_H_", "") used for nk = nsk * H
+///
+/// Computed from sapling-crypto constants.rs y-coordinate:
+/// [0x467a_f9f7_e05d_e8e7, 0x50df_51ea_f5a1_49d2, 0xdec9_0184_0f49_48cc, 0x54b6_d107_18df_2a7a]
+/// The sign bit IS set since x LSB = 1.
+const SAPLING_PROOF_GEN_KEY_GENERATOR: [u8; 32] = [
+    0xe7, 0xe8, 0x5d, 0xe0, 0xf7, 0xf9, 0x7a, 0x46,
+    0xd2, 0x49, 0xa1, 0xf5, 0xea, 0x51, 0xdf, 0x50,
+    0xcc, 0x48, 0x49, 0x0f, 0x84, 0x01, 0xc9, 0xde,
+    0x7a, 0x2a, 0xdf, 0x18, 0x07, 0xd1, 0xb6, 0xd4, // 0xd4 (sign bit set)
+];
+
+/// Get Sapling SpendAuth basepoint
+fn sapling_spend_auth_basepoint() -> JubjubPoint {
+    JubjubAffine::from_bytes(SAPLING_SPENDING_KEY_GENERATOR)
+        .expect("Invalid Sapling spending key generator")
+        .into()
+}
+
+/// Get Sapling Proof Generation Key basepoint (for nk derivation)
+fn sapling_proof_gen_basepoint() -> JubjubPoint {
+    JubjubAffine::from_bytes(SAPLING_PROOF_GEN_KEY_GENERATOR)
+        .expect("Invalid Sapling proof generation key generator")
+        .into()
 }
 
 // -----------------------------------------------------------------------------
@@ -784,6 +862,102 @@ pub unsafe extern "C" fn zsig_derive_orchard_full_viewing_key(
     ZsigError::Success
 }
 
+/// Derive Sapling Full Viewing Key from seed
+///
+/// FVK consists of: ak (authorization key), nk (nullifier key), ovk (outgoing viewing key), dk (diversifier key)
+///
+/// # Safety
+/// - `seed` must point to `seed_len` valid bytes
+/// - `fvk_out` must point to valid memory for a ZsigSaplingFullViewingKey
+#[no_mangle]
+pub unsafe extern "C" fn zsig_derive_sapling_full_viewing_key(
+    seed: *const u8,
+    seed_len: usize,
+    coin_type: u32,
+    account: u32,
+    fvk_out: *mut ZsigSaplingFullViewingKey,
+) -> ZsigError {
+    if seed.is_null() || fvk_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+
+    if seed_len < 32 || seed_len > 252 {
+        return ZsigError::InvalidSeed;
+    }
+
+    let seed_slice = slice::from_raw_parts(seed, seed_len);
+
+    // ZIP-32 Sapling master key derivation
+    let master = blake2b_personal(b"ZcashIP32Sapling", seed_slice);
+
+    let mut sk = [0u8; 32];
+    let mut chain_code = [0u8; 32];
+    sk.copy_from_slice(&master[..32]);
+    chain_code.copy_from_slice(&master[32..64]);
+
+    // Hardened child derivation: m/32'/coin_type'/account'
+    derive_sapling_child(&mut sk, &mut chain_code, 32 | 0x80000000);
+    derive_sapling_child(&mut sk, &mut chain_code, coin_type | 0x80000000);
+    derive_sapling_child(&mut sk, &mut chain_code, account | 0x80000000);
+
+    // Derive FVK components from spending key
+    // ask = PRF^expand(sk, 0x00)
+    let ask_expanded = prf_expand(&sk, SAPLING_ASK);
+    let mut ask = to_jubjub_scalar(&ask_expanded);
+
+    // nsk = PRF^expand(sk, 0x01)
+    let nsk_expanded = prf_expand(&sk, SAPLING_NSK);
+    let nsk = to_jubjub_scalar(&nsk_expanded);
+
+    // ovk = truncate_32(PRF^expand(sk, 0x02))
+    let ovk_expanded = prf_expand(&sk, SAPLING_OVK);
+    let mut ovk = [0u8; 32];
+    ovk.copy_from_slice(&ovk_expanded[..32]);
+
+    // dk (diversifier key) - derived from sk
+    // dk = truncate_32(PRF^expand(sk, 0x10))
+    let dk_expanded = prf_expand(&sk, 0x10);
+    let mut dk = [0u8; 32];
+    dk.copy_from_slice(&dk_expanded[..32]);
+
+    // ak = ask * G (Sapling SpendAuth basepoint)
+    // Use reddsa's SigningKey/VerificationKey which handles the basepoint correctly
+    let ask_bytes: [u8; 32] = ask.to_bytes();
+    let sk: reddsa::SigningKey<SaplingSpendAuth> = match reddsa::SigningKey::try_from(ask_bytes) {
+        Ok(k) => k,
+        Err(_) => return ZsigError::InvalidKey,
+    };
+
+    // Get ak from verification key, with normalization
+    let mut vk: reddsa::VerificationKey<SaplingSpendAuth> = (&sk).into();
+    let mut ak_bytes: [u8; 32] = vk.into();
+
+    // Normalize: if high bit of ak encoding is 1, negate ask and recompute
+    if (ak_bytes[31] >> 7) == 1 {
+        ask = -ask;
+        let ask_bytes_neg: [u8; 32] = ask.to_bytes();
+        let sk_neg: reddsa::SigningKey<SaplingSpendAuth> = match reddsa::SigningKey::try_from(ask_bytes_neg) {
+            Ok(k) => k,
+            Err(_) => return ZsigError::InvalidKey,
+        };
+        vk = (&sk_neg).into();
+        ak_bytes = vk.into();
+    }
+
+    // nk = nsk * H (proof generation basepoint)
+    let proof_basepoint = sapling_proof_gen_basepoint();
+    let nk: JubjubPoint = proof_basepoint * nsk;
+    let nk_bytes = JubjubAffine::from(nk).to_bytes();
+
+    // Store FVK components
+    (*fvk_out).ak = ak_bytes;
+    (*fvk_out).nk = nk_bytes;
+    (*fvk_out).ovk = ovk;
+    (*fvk_out).dk = dk;
+
+    ZsigError::Success
+}
+
 /// Encode an Orchard Full Viewing Key as a Unified Full Viewing Key string
 ///
 /// Returns the length of the encoded string (excluding null terminator),
@@ -970,7 +1144,7 @@ pub unsafe extern "C" fn zsig_derive_transparent_full_viewing_key(
     ZsigError::Success
 }
 
-/// Derive combined Full Viewing Key (Orchard + Transparent) from seed
+/// Derive combined Full Viewing Key (Transparent + Sapling + Orchard) from seed
 ///
 /// # Safety
 /// - `seed` must point to `seed_len` valid bytes
@@ -987,6 +1161,29 @@ pub unsafe extern "C" fn zsig_derive_combined_full_viewing_key(
         return ZsigError::NullPointer;
     }
 
+    // Derive Transparent FVK
+    let transparent_result = zsig_derive_transparent_full_viewing_key(
+        seed,
+        seed_len,
+        account,
+        &mut (*fvk_out).transparent,
+    );
+    if transparent_result as i32 != 0 {
+        return transparent_result;
+    }
+
+    // Derive Sapling FVK
+    let sapling_result = zsig_derive_sapling_full_viewing_key(
+        seed,
+        seed_len,
+        coin_type,
+        account,
+        &mut (*fvk_out).sapling,
+    );
+    if sapling_result as i32 != 0 {
+        return sapling_result;
+    }
+
     // Derive Orchard FVK
     let orchard_result = zsig_derive_orchard_full_viewing_key(
         seed,
@@ -999,23 +1196,12 @@ pub unsafe extern "C" fn zsig_derive_combined_full_viewing_key(
         return orchard_result;
     }
 
-    // Derive Transparent FVK
-    let transparent_result = zsig_derive_transparent_full_viewing_key(
-        seed,
-        seed_len,
-        account,
-        &mut (*fvk_out).transparent,
-    );
-    if transparent_result as i32 != 0 {
-        return transparent_result;
-    }
-
     ZsigError::Success
 }
 
 /// Encode a Combined Full Viewing Key as a Unified Full Viewing Key string
 ///
-/// This creates a UFVK with both transparent (P2PKH) and Orchard receivers.
+/// This creates a UFVK with transparent (P2PKH), Sapling, and Orchard receivers.
 /// Per ZIP-316, receivers are ordered by typecode ascending.
 ///
 /// Returns the length of the encoded string (excluding null terminator),
@@ -1042,14 +1228,15 @@ pub unsafe extern "C" fn zsig_encode_combined_full_viewing_key(
     // TLV receivers ordered by typecode ascending
     //
     // Transparent P2PKH FVK: [0x00] || [65] || chain_code (32) || pubkey (33) = 67 bytes
+    // Sapling FVK:           [0x02] || [128] || ak (32) || nk (32) || ovk (32) || dk (32) = 130 bytes
     // Orchard FVK:           [0x03] || [96] || ak (32) || nk (32) || rivk (32) = 98 bytes
-    // Total TLV: 67 + 98 = 165 bytes
-    // + 16 bytes HRP padding = 181 bytes
+    // Total TLV: 67 + 130 + 98 = 295 bytes
+    // + 16 bytes HRP padding = 311 bytes
 
     let hrp = if mainnet { "uview" } else { "uviewtest" };
 
     // Build TLV + padding
-    let mut raw = [0u8; 181];
+    let mut raw = [0u8; 311];
 
     // Transparent P2PKH FVK (typecode 0x00) - ZIP-316 format
     raw[0] = 0x00;  // Transparent P2PKH type
@@ -1057,20 +1244,28 @@ pub unsafe extern "C" fn zsig_encode_combined_full_viewing_key(
     raw[2..34].copy_from_slice(&fvk_ref.transparent.chain_code);
     raw[34..67].copy_from_slice(&fvk_ref.transparent.pubkey);
 
+    // Sapling FVK (typecode 0x02)
+    raw[67] = 0x02;   // Sapling type
+    raw[68] = 128;    // Length: 32 + 32 + 32 + 32 = 128 bytes
+    raw[69..101].copy_from_slice(&fvk_ref.sapling.ak);
+    raw[101..133].copy_from_slice(&fvk_ref.sapling.nk);
+    raw[133..165].copy_from_slice(&fvk_ref.sapling.ovk);
+    raw[165..197].copy_from_slice(&fvk_ref.sapling.dk);
+
     // Orchard FVK (typecode 0x03)
-    raw[67] = 0x03; // Orchard type
-    raw[68] = 96;   // Length: 32 + 32 + 32
-    raw[69..101].copy_from_slice(&fvk_ref.orchard.ak);
-    raw[101..133].copy_from_slice(&fvk_ref.orchard.nk);
-    raw[133..165].copy_from_slice(&fvk_ref.orchard.rivk);
+    raw[197] = 0x03; // Orchard type
+    raw[198] = 96;   // Length: 32 + 32 + 32
+    raw[199..231].copy_from_slice(&fvk_ref.orchard.ak);
+    raw[231..263].copy_from_slice(&fvk_ref.orchard.nk);
+    raw[263..295].copy_from_slice(&fvk_ref.orchard.rivk);
 
     // Append HRP right-padded with zeros to 16 bytes
     let hrp_bytes = hrp.as_bytes();
-    raw[165..165 + hrp_bytes.len()].copy_from_slice(hrp_bytes);
-    // Remaining bytes [165+hrp_len..181] are already zeros
+    raw[295..295 + hrp_bytes.len()].copy_from_slice(hrp_bytes);
+    // Remaining bytes [295+hrp_len..311] are already zeros
 
     // Apply F4Jumble
-    let mut jumbled = [0u8; 181];
+    let mut jumbled = [0u8; 311];
     if !f4_jumble(&raw, &mut jumbled) {
         return 0;
     }
@@ -1171,14 +1366,20 @@ pub unsafe extern "C" fn zsig_derive_combined_ufvk_string(
 
     // Derive combined FVK
     let mut fvk = ZsigCombinedFullViewingKey {
+        transparent: ZsigTransparentFullViewingKey {
+            chain_code: [0u8; 32],
+            pubkey: [0u8; 33],
+        },
+        sapling: ZsigSaplingFullViewingKey {
+            ak: [0u8; 32],
+            nk: [0u8; 32],
+            ovk: [0u8; 32],
+            dk: [0u8; 32],
+        },
         orchard: ZsigOrchardFullViewingKey {
             ak: [0u8; 32],
             nk: [0u8; 32],
             rivk: [0u8; 32],
-        },
-        transparent: ZsigTransparentFullViewingKey {
-            chain_code: [0u8; 32],
-            pubkey: [0u8; 33],
         },
     };
 

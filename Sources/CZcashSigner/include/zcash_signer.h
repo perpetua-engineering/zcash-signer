@@ -67,6 +67,30 @@ typedef struct {
     uint8_t bytes[64];
 } ZsigOrchardSignature;
 
+/*
+ * Sapling spending key (32 bytes)
+ * Derived via ZIP-32 path: m/32'/coin_type'/account'
+ */
+typedef struct {
+    uint8_t bytes[32];
+} ZsigSaplingSpendingKey;
+
+/*
+ * Sapling spend authorization key "ask" (32-byte scalar on Jubjub)
+ * Derived from spending key: ask = PRF^expand(sk, 0x00)
+ */
+typedef struct {
+    uint8_t bytes[32];
+} ZsigSaplingAsk;
+
+/*
+ * RedJubjub signature (64 bytes: R + S components)
+ * Used for Sapling spend authorization
+ */
+typedef struct {
+    uint8_t bytes[64];
+} ZsigSaplingSignature;
+
 /* ============================================================================
  * RNG Callback
  * ============================================================================ */
@@ -151,6 +175,67 @@ ZsigError zsig_derive_orchard_ask_from_seed(const uint8_t* seed,
                                              ZsigOrchardAsk* ask_out);
 
 /* ============================================================================
+ * ZIP-32 Sapling Key Derivation
+ * ============================================================================ */
+
+/*
+ * Derive a Sapling spending key from a BIP-39 seed using ZIP-32
+ *
+ * Path: m/32'/coin_type'/account'
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes (typically 64 bytes)
+ *   seed_len: Length of the seed (must be 32-252 bytes per ZIP-32)
+ *   coin_type: Coin type for derivation (use ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index (typically 0)
+ *   key_out: Pointer to receive the derived spending key (must not be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_sapling_spending_key(const uint8_t* seed,
+                                            size_t seed_len,
+                                            uint32_t coin_type,
+                                            uint32_t account,
+                                            ZsigSaplingSpendingKey* key_out);
+
+/*
+ * Derive the Sapling spend authorization key (ask) from a spending key
+ *
+ * ask = PRF^expand(sk, 0x00) reduced to a Jubjub scalar
+ *
+ * Parameters:
+ *   spending_key: Pointer to the spending key (must not be NULL)
+ *   ask_out: Pointer to receive the ask (must not be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_sapling_ask(const ZsigSaplingSpendingKey* spending_key,
+                                   ZsigSaplingAsk* ask_out);
+
+/*
+ * Convenience function: derive Sapling ask directly from seed
+ *
+ * Combines zsig_derive_sapling_spending_key and zsig_derive_sapling_ask.
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes (typically 64 bytes)
+ *   seed_len: Length of the seed (must be 32-252 bytes per ZIP-32)
+ *   coin_type: Coin type for derivation (use ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index (typically 0)
+ *   ask_out: Pointer to receive the ask (must not be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_sapling_ask_from_seed(const uint8_t* seed,
+                                             size_t seed_len,
+                                             uint32_t coin_type,
+                                             uint32_t account,
+                                             ZsigSaplingAsk* ask_out);
+
+/* ============================================================================
  * RedPallas Signing
  * ============================================================================ */
 
@@ -227,6 +312,84 @@ ZsigError zsig_verify_orchard(const uint8_t* ak,
  */
 ZsigError zsig_derive_ak_from_ask(const ZsigOrchardAsk* ask,
                                    uint8_t* ak_out);
+
+/* ============================================================================
+ * RedJubjub Signing (Sapling)
+ * ============================================================================ */
+
+/*
+ * Sign using RedJubjub with randomized key (main PCZT Sapling signing function)
+ *
+ * For PCZT signing, each Sapling spend has an alpha randomizer.
+ * The signature verifies against rk = ak + [alpha]G, so we sign with
+ * the randomized key: ask_randomized = ask + alpha.
+ *
+ * Parameters:
+ *   ask: Pointer to the spend authorization key (must not be NULL)
+ *   alpha: Pointer to 32-byte alpha randomizer from PCZT (must not be NULL)
+ *   sighash: Pointer to 32-byte transaction sighash (must not be NULL)
+ *   signature_out: Pointer to receive the signature (must not be NULL)
+ *   rng: Callback function for random number generation
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_sign_sapling_randomized(const ZsigSaplingAsk* ask,
+                                        const uint8_t* alpha,
+                                        const uint8_t* sighash,
+                                        ZsigSaplingSignature* signature_out,
+                                        ZsigRngCallback rng);
+
+/*
+ * Sign using RedJubjub (non-randomized, for testing)
+ *
+ * Parameters:
+ *   ask: Pointer to the spend authorization key (must not be NULL)
+ *   message: Pointer to the message data (must not be NULL)
+ *   message_len: Length of the message in bytes
+ *   signature_out: Pointer to receive the signature (must not be NULL)
+ *   rng: Callback function for random number generation
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_sign_sapling(const ZsigSaplingAsk* ask,
+                             const uint8_t* message,
+                             size_t message_len,
+                             ZsigSaplingSignature* signature_out,
+                             ZsigRngCallback rng);
+
+/*
+ * Verify a RedJubjub signature (for testing)
+ *
+ * Parameters:
+ *   ak: Pointer to 32-byte authorization key (verification key)
+ *   message: Pointer to the message data (must not be NULL)
+ *   message_len: Length of the message in bytes
+ *   signature: Pointer to the signature (must not be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS if signature is valid, error code otherwise
+ */
+ZsigError zsig_verify_sapling(const uint8_t* ak,
+                               const uint8_t* message,
+                               size_t message_len,
+                               const ZsigSaplingSignature* signature);
+
+/*
+ * Derive Sapling ak (authorization key) from ask
+ *
+ * ak = ask * G where G is the Sapling SpendAuth basepoint
+ *
+ * Parameters:
+ *   ask: Pointer to the spend authorization key (must not be NULL)
+ *   ak_out: Pointer to 32-byte buffer for ak output (must not be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_sapling_ak_from_ask(const ZsigSaplingAsk* ask,
+                                           uint8_t* ak_out);
 
 /* ============================================================================
  * BIP-44 Transparent Address Derivation
@@ -331,6 +494,16 @@ typedef struct {
     uint8_t rivk[32]; /* randomized ivk */
 } ZsigOrchardFullViewingKey;
 
+/* Sapling Full Viewing Key components
+ * ZIP-316 format: ak (32) + nk (32) + ovk (32) + dk (32) = 128 bytes
+ */
+typedef struct {
+    uint8_t ak[32];   /* authorization key */
+    uint8_t nk[32];   /* nullifier deriving key */
+    uint8_t ovk[32];  /* outgoing viewing key */
+    uint8_t dk[32];   /* diversifier key */
+} ZsigSaplingFullViewingKey;
+
 /* ============================================================================
  * Orchard Address Derivation (ZIP-316)
  * ============================================================================ */
@@ -434,6 +607,25 @@ ZsigError zsig_derive_orchard_full_viewing_key(const uint8_t* seed,
                                                 ZsigOrchardFullViewingKey* fvk_out);
 
 /*
+ * Derive Sapling Full Viewing Key from seed
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes
+ *   seed_len: Length of the seed
+ *   coin_type: Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index
+ *   fvk_out: Pointer to receive the FVK
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_sapling_full_viewing_key(const uint8_t* seed,
+                                                size_t seed_len,
+                                                uint32_t coin_type,
+                                                uint32_t account,
+                                                ZsigSaplingFullViewingKey* fvk_out);
+
+/*
  * Encode an Orchard FVK as a Unified Full Viewing Key string
  *
  * Parameters:
@@ -474,24 +666,22 @@ int32_t zsig_derive_ufvk_string(const uint8_t* seed,
                                  size_t output_len);
 
 /* ============================================================================
- * Combined UFVK (Orchard + Transparent)
+ * Combined UFVK (Transparent + Sapling + Orchard)
  * ============================================================================ */
 
 /* Transparent Full Viewing Key (for combined UFVK)
- * This is a BIP-32 extended public key at the account level (m/44'/133'/account')
+ * ZIP-316 format: chain_code (32) + compressed pubkey (33) = 65 bytes
  */
 typedef struct {
-    uint8_t depth;                    /* Depth in derivation path (3 for account level) */
-    uint8_t parent_fingerprint[4];    /* Fingerprint of parent key */
-    uint32_t child_number;            /* Child number with hardened bit */
     uint8_t chain_code[32];
     uint8_t pubkey[33];
 } ZsigTransparentFullViewingKey;
 
-/* Combined Full Viewing Key (Orchard + Transparent) */
+/* Combined Full Viewing Key (Transparent + Sapling + Orchard) */
 typedef struct {
-    ZsigOrchardFullViewingKey orchard;
     ZsigTransparentFullViewingKey transparent;
+    ZsigSaplingFullViewingKey sapling;
+    ZsigOrchardFullViewingKey orchard;
 } ZsigCombinedFullViewingKey;
 
 /*
@@ -513,7 +703,7 @@ ZsigError zsig_derive_transparent_full_viewing_key(const uint8_t* seed,
                                                     ZsigTransparentFullViewingKey* fvk_out);
 
 /*
- * Derive combined Full Viewing Key (Orchard + Transparent) from seed
+ * Derive combined Full Viewing Key (Transparent + Sapling + Orchard) from seed
  *
  * Parameters:
  *   seed: The BIP-39 seed bytes
@@ -534,7 +724,7 @@ ZsigError zsig_derive_combined_full_viewing_key(const uint8_t* seed,
 /*
  * Encode a Combined Full Viewing Key as a Unified Full Viewing Key string
  *
- * Creates a UFVK with both transparent (P2PKH) and Orchard receivers.
+ * Creates a UFVK with transparent (P2PKH), Sapling, and Orchard receivers.
  * Per ZIP-316, receivers are ordered by typecode ascending.
  *
  * Parameters:

@@ -187,6 +187,24 @@ pub struct ZsigOrchardSignature {
     pub bytes: [u8; 64],
 }
 
+/// Sapling spending key (32 bytes)
+#[repr(C)]
+pub struct ZsigSaplingSpendingKey {
+    pub bytes: [u8; 32],
+}
+
+/// Sapling spend authorization key "ask" (32-byte scalar on Jubjub)
+#[repr(C)]
+pub struct ZsigSaplingAsk {
+    pub bytes: [u8; 32],
+}
+
+/// RedJubjub signature (64 bytes: R + S)
+#[repr(C)]
+pub struct ZsigSaplingSignature {
+    pub bytes: [u8; 64],
+}
+
 // -----------------------------------------------------------------------------
 // Version Info
 // -----------------------------------------------------------------------------
