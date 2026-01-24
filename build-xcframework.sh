@@ -175,11 +175,11 @@ echo "==> Exported symbols (sample):"
 nm -g "$BUILD_DIR/aarch64-apple-watchos/release/libzcash_signer.a" 2>/dev/null | grep " T _zsig_" | head -5
 
 echo ""
-echo "==> Copying to Vendor/ for SPM..."
+echo "==> Copying to vendor/ for SPM..."
 mkdir -p "$SCRIPT_DIR/Vendor"
-rm -rf "$SCRIPT_DIR/Vendor/ZcashSigner.xcframework"
-cp -R "$XCFRAMEWORK_DIR" "$SCRIPT_DIR/Vendor/"
-echo "Copied to Vendor/ZcashSigner.xcframework"
+rm -rf "$SCRIPT_DIR/vendor/ZcashSigner.xcframework"
+cp -R "$XCFRAMEWORK_DIR" "$SCRIPT_DIR/vendor/"
+echo "Copied to vendor/ZcashSigner.xcframework"
 
 echo ""
-echo "Done! XCFramework ready for SPM at: Vendor/ZcashSigner.xcframework"
+echo "Done! XCFramework ready for SPM at: vendor/ZcashSigner.xcframework"

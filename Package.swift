@@ -4,11 +4,11 @@ import PackageDescription
 // ARCHITECTURE:
 // =============
 // This package wraps a pre-built Rust library (libzcash_signer) as an xcframework.
-// The xcframework is built by build-xcframework.sh and copied to Vendor/.
+// The xcframework is built by build-xcframework.sh and copied to vendor/.
 //
 // Build flow:
 //   1. Run ./build-xcframework.sh to compile Rust for all platforms
-//   2. Script creates Vendor/ZcashSigner.xcframework
+//   2. Script creates vendor/ZcashSigner.xcframework
 //   3. SPM uses the xcframework as a binary target
 //
 // This approach follows WalletCoreSPM's pattern and eliminates the need for
@@ -33,7 +33,7 @@ let package = Package(
         // Contains libzcash_signer.a + headers for all Apple platforms
         .binaryTarget(
             name: "ZcashSigner",
-            path: "Vendor/ZcashSigner.xcframework"
+            path: "vendor/ZcashSigner.xcframework"
         ),
 
         // Swift wrapper providing safe, idiomatic API
