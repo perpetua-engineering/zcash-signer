@@ -39,7 +39,7 @@ ripemd = { version = "0.1", default-features = false }
 # Base58check for transparent addresses
 bs58 = { version = "0.5", default-features = false, features = ["alloc", "check"] }
 bip39 = { version = "2", default-features = false, features = ["std"], optional = true }
-orchard = { path = "../orchard-fork", default-features = false, features = ["std"], optional = true }
+orchard = { git = "https://github.com/perpetua-engineering/orchard", branch = "perpetua", default-features = false, features = ["std"], optional = true }
 zip32 = { version = "0.2.0", default-features = false, optional = true }
 hex = { version = "0.4", optional = true }
 
