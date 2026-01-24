@@ -267,6 +267,150 @@ public struct ZcashOrchardAsk {
     }
 }
 
+// MARK: - Sapling Spend Authorization Key
+
+/// Sapling spend authorization key (ask)
+///
+/// This is the key used to sign Sapling spends in PCZT transactions.
+/// Uses RedJubjub signatures on the Jubjub curve.
+public struct ZcashSaplingAsk {
+    public let bytes: Data
+
+    public init(bytes: Data) throws {
+        guard bytes.count == 32 else {
+            throw ZcashSignerError.invalidKey
+        }
+        self.bytes = bytes
+    }
+
+    /// Derive ask directly from a BIP-39 seed
+    ///
+    /// This is a convenience function that combines spending key derivation and ask derivation.
+    ///
+    /// - Parameters:
+    ///   - seed: The BIP-39 seed (typically 64 bytes)
+    ///   - coinType: Coin type for derivation (default: ZSIG_MAINNET_COIN_TYPE = 133)
+    ///   - account: Account index (default: 0)
+    /// - Returns: The derived Sapling spend authorization key
+    public static func deriveFromSeed(
+        _ seed: Data,
+        coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
+        account: UInt32 = 0
+    ) throws -> ZcashSaplingAsk {
+        var ask = ZsigSaplingAsk()
+
+        let result = seed.withUnsafeBytes { seedPtr in
+            zsig_derive_sapling_ask_from_seed(
+                seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                seed.count,
+                coinType,
+                account,
+                &ask
+            )
+        }
+
+        guard result.rawValue == 0 else {
+            throw ZcashSignerError(code: result.rawValue)
+        }
+
+        return try ZcashSaplingAsk(bytes: Data(bytes: &ask.bytes, count: 32))
+    }
+
+    /// Derive the authorization key (ak) from this ask
+    ///
+    /// ak = ask * G where G is the Sapling SpendAuth basepoint
+    ///
+    /// - Returns: The 32-byte authorization key
+    public func deriveAk() throws -> Data {
+        var askFFI = ZsigSaplingAsk()
+        bytes.withUnsafeBytes { ptr in
+            _ = memcpy(&askFFI.bytes, ptr.baseAddress!, 32)
+        }
+
+        var ak = [UInt8](repeating: 0, count: 32)
+        let result = zsig_derive_sapling_ak_from_ask(&askFFI, &ak)
+
+        guard result.rawValue == 0 else {
+            throw ZcashSignerError(code: result.rawValue)
+        }
+
+        return Data(ak)
+    }
+
+    /// Sign a sighash using RedJubjub with a randomized key (PCZT signing)
+    ///
+    /// For PCZT signing, each Sapling spend has an alpha randomizer.
+    /// The signature verifies against rk = ak + [alpha]G, so we sign with
+    /// the randomized key: ask_randomized = ask + alpha.
+    ///
+    /// - Parameters:
+    ///   - sighash: The 32-byte transaction sighash
+    ///   - alpha: The 32-byte alpha randomizer from the PCZT
+    /// - Returns: The 64-byte RedJubjub signature
+    public func signRandomized(sighash: Data, alpha: Data) throws -> Data {
+        guard sighash.count == 32 else {
+            throw ZcashSignerError.invalidKey
+        }
+        guard alpha.count == 32 else {
+            throw ZcashSignerError.invalidKey
+        }
+
+        var askFFI = ZsigSaplingAsk()
+        bytes.withUnsafeBytes { ptr in
+            _ = memcpy(&askFFI.bytes, ptr.baseAddress!, 32)
+        }
+
+        var signature = ZsigSaplingSignature()
+
+        let result = sighash.withUnsafeBytes { sighashPtr in
+            alpha.withUnsafeBytes { alphaPtr in
+                zsig_sign_sapling_randomized(
+                    &askFFI,
+                    alphaPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    sighashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    &signature,
+                    secureRandomCallback
+                )
+            }
+        }
+
+        guard result.rawValue == 0 else {
+            throw ZcashSignerError(code: result.rawValue)
+        }
+
+        return Data(bytes: &signature.bytes, count: 64)
+    }
+
+    /// Sign a message using RedJubjub (non-randomized, for testing)
+    ///
+    /// - Parameter message: The message to sign
+    /// - Returns: The 64-byte RedJubjub signature
+    public func sign(message: Data) throws -> Data {
+        var askFFI = ZsigSaplingAsk()
+        bytes.withUnsafeBytes { ptr in
+            _ = memcpy(&askFFI.bytes, ptr.baseAddress!, 32)
+        }
+
+        var signature = ZsigSaplingSignature()
+
+        let result = message.withUnsafeBytes { msgPtr in
+            zsig_sign_sapling(
+                &askFFI,
+                msgPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                message.count,
+                &signature,
+                secureRandomCallback
+            )
+        }
+
+        guard result.rawValue == 0 else {
+            throw ZcashSignerError(code: result.rawValue)
+        }
+
+        return Data(bytes: &signature.bytes, count: 64)
+    }
+}
+
 // MARK: - Transparent Address Derivation
 
 /// Derive a transparent P2PKH address from seed using BIP-44
