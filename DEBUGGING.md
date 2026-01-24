@@ -135,3 +135,64 @@ TxID: 267a2d9eb1f550377cfed5296b7197fa427e476c4951aec2f4db56f413a4addb
    - SDK `Tools/ZcashSigner` dylib
    - ensure both use the same key derivation and signing algorithm
 4) Run `ask_compare` against the current seed to see whether our ZIP-32 sk/ask derivation diverges.
+
+---
+
+## Sapling FVK Validation Issue (2025-01-23) [RESOLVED]
+
+### Problem
+When generating a combined UFVK (Transparent + Sapling + Orchard), the SDK rejected it with:
+```
+Invalid key data for key type Sapling
+```
+
+### Investigation
+1. The UFVK length matched SDK output (510 chars)
+2. Transparent and Orchard components validated correctly
+3. The Sapling FVK was being rejected during UFVK parsing
+
+### Root Cause
+The `SAPLING_PROOF_GEN_KEY_GENERATOR` constant had an incorrect sign bit.
+
+In Jubjub/Edwards curve point encoding:
+- The y-coordinate is stored in the first 31.875 bytes
+- The sign bit (indicating x-coordinate parity) is in the MSB of the last byte
+
+The x-coordinate of PROOF_GENERATION_KEY_GENERATOR from sapling-crypto:
+```rust
+x = 0x3af2_dbef_b96e_2571...
+```
+The LSB of x is `1`, meaning the sign bit should be SET.
+
+**Wrong**: Last byte was `0x54` (sign bit NOT set)
+**Correct**: Last byte should be `0xd4` (sign bit SET)
+
+### Fix
+Updated `src/address.rs`:
+```rust
+const SAPLING_PROOF_GEN_KEY_GENERATOR: [u8; 32] = [
+    0xe7, 0xe8, 0x5d, 0xe0, 0xf7, 0xf9, 0x7a, 0x46,
+    0xd2, 0x49, 0xa1, 0xf5, 0xea, 0x51, 0xdf, 0x50,
+    0xcc, 0x48, 0x49, 0x0f, 0x84, 0x01, 0xc9, 0xde,
+    0x7a, 0x2a, 0xdf, 0x18, 0x07, 0xd1, 0xb6, 0xd4, // 0xd4 (sign bit set)
+];
+```
+
+### Verification
+Use `pczt-cli test-ufvk` to validate Rust UFVK against SDK:
+```bash
+ZCASH_SEED="..." pczt-cli test-ufvk
+```
+
+Output shows:
+- `isValidUnifiedFullViewingKey: true`
+- Successfully derived unified address from Rust UFVK
+- Both UFVKs have same length (510 chars)
+
+### Lesson Learned
+When computing compressed Edwards curve point encodings manually:
+1. Convert the y-coordinate to little-endian bytes
+2. Determine the sign bit from the x-coordinate's LSB
+3. Set the MSB of the last byte if sign bit is 1
+
+Better yet: use the curve library's `to_bytes()` method directly to avoid manual encoding errors.

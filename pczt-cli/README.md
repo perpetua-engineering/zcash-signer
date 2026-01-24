@@ -31,12 +31,13 @@ swift build --product pczt-cli
 | `sync` | Sync wallet with the blockchain |
 | `propose` | Create a shielding or transfer proposal → base PCZT |
 | `extract-sighashes` | Extract sighashes from PCZT for signing |
-| `sign` | Sign sighashes with ASK (Orchard) and seed (transparent) |
+| `sign` | Sign sighashes with ASK (Orchard/Sapling) and seed (transparent) |
 | `apply-signatures` | Apply signatures to PCZT |
 | `prove` | Add zk-SNARK proofs to PCZT |
 | `broadcast` | Submit proven+signed PCZT to network (fork-merge flow) |
 | `send` | Complete and broadcast signed PCZT (sequential flow) |
 | `inspect` | Show PCZT summary and state |
+| `test-ufvk` | Validate Rust UFVK derivation against SDK |
 
 ## Workflow Patterns
 
@@ -175,6 +176,29 @@ Output shows:
 - Transparent inputs/outputs and signature counts
 - Sapling spends/outputs, anchor, value sum, bsk presence
 - Orchard actions, anchor, flags, value sum, bsk presence, signature counts
+
+## Testing UFVK Derivation
+
+The `test-ufvk` command validates that our Rust UFVK derivation produces valid UFVKs:
+
+```bash
+ZCASH_SEED="your seed here" pczt-cli test-ufvk
+```
+
+This command:
+1. Derives a UFVK using the SDK (reference implementation)
+2. Derives a UFVK using the Rust library (Transparent + Sapling + Orchard)
+3. Validates the Rust UFVK using the SDK's `isValidUnifiedFullViewingKey`
+4. Derives a unified address from the Rust UFVK to confirm it's usable
+
+Expected output:
+```
+[Test] isValidUnifiedFullViewingKey: true
+[Test] Derived UA from Rust UFVK: u1...
+[Test] SUCCESS: Rust UFVK validated by SDK!
+```
+
+The UFVKs may differ in string encoding (receiver ordering, etc.) but both should be valid and derive the same addresses.
 
 ## License
 

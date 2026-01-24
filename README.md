@@ -5,7 +5,10 @@ Minimal Zcash signing primitives for watchOS. This crate provides the cryptograp
 ## Features
 
 - **ZIP-32 Orchard key derivation** - Derive spending keys and `ask` from BIP-39 seeds
+- **ZIP-32 Sapling key derivation** - Derive Sapling spending keys and `ask` for legacy shielded funds
 - **RedPallas randomized signing** - Sign Orchard spends with alpha randomizers for PCZT
+- **RedJubjub randomized signing** - Sign Sapling spends with alpha randomizers for PCZT
+- **Combined UFVK generation** - Produce Unified Full Viewing Keys with Transparent + Sapling + Orchard
 - **BIP-44 transparent addresses** - Derive t-addresses for CEX compatibility
 - **`no_std` compatible** - Runs on watchOS tier-3 targets (arm64, arm64_32)
 
@@ -70,15 +73,18 @@ import ZcashSignerCore
 // From a BIP-39 seed (64 bytes)
 let seed: Data = ... // your mnemonic-derived seed
 
-// Derive ask (spend authorization key) directly from seed
-let ask = try ZcashOrchardAsk.deriveFromSeed(seed, account: 0)
+// Derive Orchard ask (spend authorization key) directly from seed
+let orchardAsk = try ZcashOrchardAsk.deriveFromSeed(seed, account: 0)
 
 // Or step-by-step:
 let spendingKey = try ZcashOrchardSpendingKey.deriveFromSeed(seed, account: 0)
-let ask = try spendingKey.deriveAsk()
+let orchardAsk = try spendingKey.deriveAsk()
 
 // Derive ak (authorization key) for verification
-let ak = try ask.deriveAk()  // 32 bytes
+let ak = try orchardAsk.deriveAk()  // 32 bytes
+
+// Derive Sapling ask for legacy shielded funds
+let saplingAsk = try ZcashSaplingAsk.deriveFromSeed(seed, account: 0)
 ```
 
 ### PCZT Signing
@@ -88,8 +94,25 @@ let ak = try ask.deriveAk()  // 32 bytes
 let sighash: Data = ...  // 32-byte transaction sighash
 let alpha: Data = ...    // 32-byte alpha randomizer from PCZT spend
 
-let signature = try ask.signRandomized(sighash: sighash, alpha: alpha)
+let orchardSig = try orchardAsk.signRandomized(sighash: sighash, alpha: alpha)
 // signature is 64 bytes (R || S)
+
+// Sign a Sapling spend with alpha randomizer
+let saplingSig = try saplingAsk.signRandomized(sighash: sighash, alpha: alpha)
+// signature is 64 bytes (R || S)
+```
+
+### UFVK Derivation
+
+```swift
+// Derive combined UFVK (Transparent + Sapling + Orchard)
+let ufvk = try deriveCombinedUFVKString(
+    seed: seed,
+    coinType: ZSIG_MAINNET_COIN_TYPE,
+    account: 0,
+    mainnet: true
+)
+// Returns "uview1..." string validated by SDK
 ```
 
 ### Transparent Addresses
@@ -117,6 +140,8 @@ let pubkeyHash = try deriveTransparentPubkeyHash(
 
 For direct C/Objective-C usage:
 
+### Orchard (RedPallas)
+
 | Function | Description |
 |----------|-------------|
 | `zsig_derive_orchard_spending_key` | ZIP-32 spending key from seed |
@@ -126,19 +151,50 @@ For direct C/Objective-C usage:
 | `zsig_sign_orchard` | Non-randomized signing |
 | `zsig_verify_orchard` | Signature verification |
 | `zsig_derive_ak_from_ask` | Derive authorization key |
+| `zsig_derive_orchard_full_viewing_key` | Derive Orchard FVK (ak, nk, rivk) |
+
+### Sapling (RedJubjub)
+
+| Function | Description |
+|----------|-------------|
+| `zsig_derive_sapling_spending_key` | ZIP-32 spending key from seed |
+| `zsig_derive_sapling_ask` | Extract ask from spending key |
+| `zsig_derive_sapling_ask_from_seed` | Convenience: ask directly from seed |
+| `zsig_sign_sapling_randomized` | PCZT signing with alpha randomizer |
+| `zsig_sign_sapling` | Non-randomized signing |
+| `zsig_verify_sapling` | Signature verification |
+| `zsig_derive_sapling_ak_from_ask` | Derive authorization key |
+| `zsig_derive_sapling_full_viewing_key` | Derive Sapling FVK (ak, nk, ovk, dk) |
+
+### Transparent (secp256k1)
+
+| Function | Description |
+|----------|-------------|
 | `zsig_derive_transparent_address` | BIP-44 t-address string |
 | `zsig_derive_transparent_pubkey_hash` | BIP-44 pubkey hash (20 bytes) |
+| `zsig_derive_transparent_fvk` | BIP-44 extended pubkey (chain code + pubkey) |
+| `zsig_sign_transparent` | Sign transparent input (DER signature) |
+
+### UFVK (ZIP-316)
+
+| Function | Description |
+|----------|-------------|
+| `zsig_derive_combined_ufvk_string` | Derive full UFVK (Transparent + Sapling + Orchard) |
+| `zsig_encode_unified_full_viewing_key` | Encode Orchard-only FVK as UFVK |
+| `zsig_encode_combined_ufvk` | Encode combined FVK as UFVK |
 
 ## Architecture Notes
 
 ### Why This Exists
 
-The upstream `orchard` crate's ZIP-32 key derivation requires `std`, which isn't available on watchOS (tier-3 target). This crate implements the same algorithms using `no_std`-compatible primitives:
+The upstream `orchard` and `sapling-crypto` crates' ZIP-32 key derivation requires `std`, which isn't available on watchOS (tier-3 target). This crate implements the same algorithms using `no_std`-compatible primitives:
 
-- `reddsa` for RedPallas signatures
-- `pasta_curves` for Pallas scalar/point operations
+- `reddsa` for RedPallas (Orchard) and RedJubjub (Sapling) signatures
+- `pasta_curves` for Pallas scalar/point operations (Orchard)
+- `jubjub` for Jubjub scalar/point operations (Sapling)
 - `blake2b_simd` (vendored) for ZIP-32 PRF^expand
-- `sinsemilla` for IVK derivation (if needed)
+- `sinsemilla` for IVK derivation
+- `k256` for secp256k1 operations (transparent)
 
 ### Signing Flow
 
@@ -150,13 +206,20 @@ Phone (SDK)                          Watch (this crate)
    - Alpha randomizers
    - Sighash
                     ──────────────►
-                                     2. For each spend:
+                                     2. For each Orchard spend:
                                         ask_rand = ask + alpha
                                         sig = RedPallas::sign(ask_rand, sighash)
+
+                                     3. For each Sapling spend:
+                                        ask_rand = ask + alpha
+                                        sig = RedJubjub::sign(ask_rand, sighash)
+
+                                     4. For each transparent input:
+                                        sig = ECDSA::sign_prehash(privkey, sighash)
                     ◄──────────────
-3. Apply signatures to PCZT
-4. Generate zk-SNARK proofs
-5. Broadcast transaction
+5. Apply signatures to PCZT
+6. Generate zk-SNARK proofs
+7. Broadcast transaction
 ```
 
 ### Vendor Patches
@@ -254,6 +317,14 @@ pczt-cli broadcast <proven_pczt> <signed_pczt>
       "already_signed": true
     }
   ],
+  "sapling_spends": [
+    {
+      "index": 0,
+      "randomizer": "5d86594b...",
+      "rk": "def456...",
+      "already_signed": false
+    }
+  ],
   "transparent_inputs": [
     {
       "index": 0,
@@ -272,6 +343,9 @@ pczt-cli broadcast <proven_pczt> <signed_pczt>
 ```json
 {
   "orchard_signatures": [
+    { "index": 0, "signature": "64-byte-hex" }
+  ],
+  "sapling_signatures": [
     { "index": 0, "signature": "64-byte-hex" }
   ],
   "transparent_signatures": [
