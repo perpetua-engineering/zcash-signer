@@ -85,6 +85,9 @@ let ak = try orchardAsk.deriveAk()  // 32 bytes
 
 // Derive Sapling ask for legacy shielded funds
 let saplingAsk = try ZcashSaplingAsk.deriveFromSeed(seed, account: 0)
+
+// Derive Sapling ak (authorization key) for verification
+let saplingAk = try saplingAsk.deriveAk()  // 32 bytes
 ```
 
 ### PCZT Signing
