@@ -176,9 +176,10 @@ nm -g "$BUILD_DIR/aarch64-apple-watchos/release/libzcash_signer.a" 2>/dev/null |
 
 echo ""
 echo "==> Copying to vendor/ for SPM..."
-mkdir -p "$SCRIPT_DIR/Vendor"
+mkdir -p "$SCRIPT_DIR/vendor"
 rm -rf "$SCRIPT_DIR/vendor/ZcashSigner.xcframework"
 cp -R "$XCFRAMEWORK_DIR" "$SCRIPT_DIR/vendor/"
+rm -rf "$XCFRAMEWORK_DIR"  # Clean up root copy
 echo "Copied to vendor/ZcashSigner.xcframework"
 
 echo ""
