@@ -1,0 +1,4 @@
+module ZcashSigner {
+    header "zcash_signer.h"
+    export *
+}
