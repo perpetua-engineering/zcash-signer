@@ -25,12 +25,21 @@ struct AddressCommand: ParsableCommand {
         let derivationTool = DerivationTool(networkType: networkType)
 
         let unifiedAddress = try derivationTool.deriveUnifiedAddressFrom(ufvk: config.ufvk)
-        let transparentAddress = try derivationTool.transparentReceiver(from: unifiedAddress)
         let saplingAddress = try derivationTool.saplingReceiver(from: unifiedAddress)
+
+        // Use the BIP-44 derived transparent address from config (matches app behavior)
+        // Fall back to extracting from UA for backwards compatibility with old configs
+        let transparentAddressString: String
+        if let savedAddress = config.transparentAddress {
+            transparentAddressString = savedAddress
+        } else {
+            let transparentReceiver = try derivationTool.transparentReceiver(from: unifiedAddress)
+            transparentAddressString = transparentReceiver.stringEncoded
+        }
 
         let output = AddressOutput(
             unified: unifiedAddress.stringEncoded,
-            transparent: transparentAddress.stringEncoded,
+            transparent: transparentAddressString,
             sapling: saplingAddress.stringEncoded
         )
         try outputJSON(output)
