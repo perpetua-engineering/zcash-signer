@@ -159,6 +159,8 @@ xcodebuild -create-xcframework \
     -headers "$HEADER_DIR" \
     -library "$BUILD_DIR/watchos-sim-universal/libzcash_signer.a" \
     -headers "$HEADER_DIR" \
+    -library "$BUILD_DIR/macos-universal/libzcash_signer.a" \
+    -headers "$HEADER_DIR" \
     -output "$XCFRAMEWORK_DIR"
 
 echo ""

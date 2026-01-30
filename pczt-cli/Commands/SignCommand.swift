@@ -11,7 +11,7 @@ import Foundation
 import Darwin
 import ZcashLightClientKit
 import ZcashSignerCore
-import CZcashSigner
+import ZcashSigner
 
 private final class ToolsSigner {
     typealias OrchardSignFn = @convention(c) (
