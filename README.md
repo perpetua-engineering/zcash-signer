@@ -121,20 +121,28 @@ let ufvk = try deriveCombinedUFVKString(
 ### Transparent Addresses
 
 ```swift
-// Derive t-address (BIP-44 path: m/44'/133'/account'/0/index)
+// First, find the valid diversifier index for ZIP-316 UA compatibility
+let (diversifierIndex, _) = try deriveFirstValidDiversifierIndex(
+    seed: seed,
+    coinType: 133,  // mainnet
+    account: 0
+)
+
+// Derive t-address using the diversifier index
+// BIP-44 path: m/44'/133'/account'/0/index
 let tAddress = try deriveTransparentAddress(
     seed: seed,
     account: 0,
-    index: 0,
+    index: UInt32(diversifierIndex),
     mainnet: true
 )
-// Returns "t1..." string
+// Returns "t1..." string matching the UA's transparent receiver
 
 // Or just the pubkey hash (for Unified Address construction)
 let pubkeyHash = try deriveTransparentPubkeyHash(
     seed: seed,
     account: 0,
-    index: 0
+    index: UInt32(diversifierIndex)
 )
 // Returns 20 bytes
 ```
