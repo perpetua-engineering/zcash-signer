@@ -108,6 +108,7 @@ struct WalletConfig: Codable {
     let birthday: UInt32
     let lightwalletdURL: String
     let accountIndex: UInt32
+    let transparentAddress: String?
 
     enum NetworkType: String, Codable {
         case mainnet

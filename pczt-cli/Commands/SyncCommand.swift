@@ -76,7 +76,8 @@ struct SyncCommand: AsyncParsableCommand {
                 network: networkType,
                 birthday: birthday ?? 2657762,
                 lightwalletdURL: lightwalletd ?? "https://zec.rocks:443",
-                accountIndex: 0
+                accountIndex: 0,
+                transparentAddress: nil
             )
         } else if StateManager.shared.walletConfigExists() {
             var config = try StateManager.shared.loadWalletConfig()
@@ -86,7 +87,8 @@ struct SyncCommand: AsyncParsableCommand {
                     network: config.network,
                     birthday: config.birthday,
                     lightwalletdURL: lightwalletd,
-                    accountIndex: config.accountIndex
+                    accountIndex: config.accountIndex,
+                    transparentAddress: config.transparentAddress
                 )
             }
             return config

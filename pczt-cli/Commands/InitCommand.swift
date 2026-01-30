@@ -64,7 +64,8 @@ struct InitCommand: AsyncParsableCommand {
             network: networkType == .mainnet ? .mainnet : .testnet,
             birthday: birthday,
             lightwalletdURL: lightwalletd,
-            accountIndex: account
+            accountIndex: account,
+            transparentAddress: transparentAddress
         )
         try StateManager.shared.saveWalletConfig(config)
         errorOutput("[Init] Saved wallet config to \(StateManager.shared.walletConfigFile.path)")

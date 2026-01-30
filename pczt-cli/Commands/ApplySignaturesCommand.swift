@@ -110,7 +110,8 @@ struct ApplySignaturesCommand: AsyncParsableCommand {
                     network: config.network,
                     birthday: config.birthday,
                     lightwalletdURL: lightwalletd,
-                    accountIndex: config.accountIndex
+                    accountIndex: config.accountIndex,
+                    transparentAddress: config.transparentAddress
                 )
             }
             return config
