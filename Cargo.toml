@@ -36,6 +36,12 @@ sha2 = { version = "0.10", default-features = false }
 # RIPEMD-160 for P2PKH address derivation
 ripemd = { version = "0.1", default-features = false }
 
+# AES for FF1-AES diversifier derivation (ZIP-32)
+aes = { version = "0.8", default-features = false }
+
+# BLAKE2s for Sapling DiversifyHash
+blake2 = { version = "0.10", default-features = false }
+
 # Base58check for transparent addresses
 bs58 = { version = "0.5", default-features = false, features = ["alloc", "check"] }
 bip39 = { version = "2", default-features = false, features = ["std"], optional = true }
