@@ -45,11 +45,20 @@ struct InitCommand: AsyncParsableCommand {
         let ask = try spendingKey.deriveAsk()
         errorOutput("[Init] Derived Orchard ASK")
 
-        // Derive transparent address for display
+        // Find first valid diversifier index (required for ZIP-316 UA compatibility)
+        let (diversifierIndex, _) = try deriveFirstValidDiversifierIndex(
+            seed: seed,
+            coinType: coinType,
+            account: account
+        )
+        errorOutput("[Init] First valid diversifier index: \(diversifierIndex)")
+
+        // Derive transparent address using the diversifier index
+        // This ensures the t-address matches what's in the Unified Address
         let transparentAddress = try deriveTransparentAddress(
             seed: seed,
             account: account,
-            index: 0,
+            index: UInt32(diversifierIndex),
             mainnet: networkType == .mainnet
         )
         errorOutput("[Init] Derived transparent address: \(transparentAddress)")
