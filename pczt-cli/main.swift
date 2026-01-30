@@ -26,6 +26,7 @@ struct PCZTCli: ParsableCommand {
             SendCommand.self,
             InspectCommand.self,
             TestUfvkCommand.self,
+            CompareAddressCommand.self,
         ]
     )
 }
