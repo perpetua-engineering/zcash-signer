@@ -17,12 +17,14 @@
 extern crate alloc;
 
 mod address;
+mod diversifier;
 mod keys;
 mod signing;
 mod transparent;
 
 // Re-export for FFI
 pub use address::*;
+pub use diversifier::*;
 pub use keys::*;
 pub use signing::*;
 pub use transparent::*;
