@@ -958,6 +958,76 @@ pub unsafe extern "C" fn zsig_derive_sapling_full_viewing_key(
     ZsigError::Success
 }
 
+/// Derive the first valid Sapling diversifier index from a BIP-39 seed
+///
+/// This function derives the Sapling diversifier key (dk) from the seed,
+/// then searches for the first index where the diversifier produces a valid
+/// Sapling address (DiversifyHash doesn't return ⊥).
+///
+/// The returned index should be used for:
+/// - Sapling address derivation (diversifier index)
+/// - Transparent address derivation (BIP-44 index)
+///
+/// This ensures the Unified Address will have matching diversifier indices
+/// across all receiver types, as required by ZIP-316.
+///
+/// # Safety
+/// - `seed` must point to `seed_len` readable bytes
+/// - `seed_len` must be between 32 and 252
+/// - `index_out` must point to a writable u64
+/// - `diversifier_out` must point to 11 writable bytes (optional, can be null)
+#[no_mangle]
+pub unsafe extern "C" fn zsig_derive_first_valid_diversifier_index(
+    seed: *const u8,
+    seed_len: usize,
+    coin_type: u32,
+    account: u32,
+    index_out: *mut u64,
+    diversifier_out: *mut u8,
+) -> ZsigError {
+    use crate::diversifier::find_first_valid_diversifier;
+
+    if seed.is_null() || index_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+
+    if seed_len < 32 || seed_len > 252 {
+        return ZsigError::InvalidSeed;
+    }
+
+    let seed_slice = slice::from_raw_parts(seed, seed_len);
+
+    // ZIP-32 Sapling master key derivation
+    let master = blake2b_personal(b"ZcashIP32Sapling", seed_slice);
+
+    let mut sk = [0u8; 32];
+    let mut chain_code = [0u8; 32];
+    sk.copy_from_slice(&master[..32]);
+    chain_code.copy_from_slice(&master[32..64]);
+
+    // Hardened child derivation: m/32'/coin_type'/account'
+    derive_sapling_child(&mut sk, &mut chain_code, 32 | 0x80000000);
+    derive_sapling_child(&mut sk, &mut chain_code, coin_type | 0x80000000);
+    derive_sapling_child(&mut sk, &mut chain_code, account | 0x80000000);
+
+    // Derive dk from sk
+    // dk = truncate_32(PRF^expand(sk, 0x10))
+    let dk_expanded = prf_expand(&sk, 0x10);
+    let mut dk = [0u8; 32];
+    dk.copy_from_slice(&dk_expanded[..32]);
+
+    // Find first valid diversifier index
+    let (index, diversifier) = find_first_valid_diversifier(&dk);
+
+    *index_out = index;
+
+    if !diversifier_out.is_null() {
+        slice::from_raw_parts_mut(diversifier_out, 11).copy_from_slice(&diversifier);
+    }
+
+    ZsigError::Success
+}
+
 /// Encode an Orchard Full Viewing Key as a Unified Full Viewing Key string
 ///
 /// Returns the length of the encoded string (excluding null terminator),

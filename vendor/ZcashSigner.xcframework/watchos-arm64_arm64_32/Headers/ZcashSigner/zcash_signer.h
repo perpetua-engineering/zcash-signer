@@ -392,6 +392,72 @@ ZsigError zsig_derive_sapling_ak_from_ask(const ZsigSaplingAsk* ask,
                                            uint8_t* ak_out);
 
 /* ============================================================================
+ * FF1-AES256 Diversifier Derivation (ZIP-32)
+ * ============================================================================ */
+
+/*
+ * Derive the first valid Sapling diversifier index from a BIP-39 seed
+ *
+ * This function derives the Sapling diversifier key (dk) from the seed,
+ * then searches for the first index where the diversifier produces a valid
+ * Sapling address (DiversifyHash doesn't return bottom).
+ *
+ * The returned index should be used for:
+ * - Sapling address derivation (diversifier index)
+ * - Transparent address derivation (BIP-44 index)
+ *
+ * This ensures the Unified Address will have matching diversifier indices
+ * across all receiver types, as required by ZIP-316.
+ *
+ * Parameters:
+ *   seed: The BIP-39 seed bytes
+ *   seed_len: Length of the seed (32-252 bytes per ZIP-32)
+ *   coin_type: Coin type for derivation (use ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account: Account index
+ *   index_out: Pointer to receive the first valid diversifier index (must not be NULL)
+ *   diversifier_out: Optional pointer to receive 11-byte diversifier (can be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_first_valid_diversifier_index(const uint8_t* seed,
+                                                      size_t seed_len,
+                                                      uint32_t coin_type,
+                                                      uint32_t account,
+                                                      uint64_t* index_out,
+                                                      uint8_t* diversifier_out);
+
+/*
+ * Derive diversifier from diversifier key and index using FF1-AES256
+ *
+ * Parameters:
+ *   dk: 32-byte diversifier key
+ *   index: Diversifier index
+ *   diversifier_out: Buffer for 11-byte diversifier output
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_derive_diversifier(const uint8_t* dk,
+                                   uint64_t index,
+                                   uint8_t* diversifier_out);
+
+/*
+ * Find the first valid diversifier index for a given diversifier key
+ *
+ * Parameters:
+ *   dk: 32-byte diversifier key
+ *   index_out: Pointer to receive first valid index
+ *   diversifier_out: Buffer for 11-byte diversifier output
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success, error code on failure
+ */
+ZsigError zsig_find_valid_diversifier(const uint8_t* dk,
+                                       uint64_t* index_out,
+                                       uint8_t* diversifier_out);
+
+/* ============================================================================
  * BIP-44 Transparent Address Derivation
  * ============================================================================ */
 

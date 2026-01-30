@@ -411,6 +411,46 @@ public struct ZcashSaplingAsk {
     }
 }
 
+// MARK: - Diversifier Derivation
+
+/// Derive the first valid Sapling diversifier index from a BIP-39 seed
+///
+/// This function derives the Sapling diversifier key (dk) from the seed,
+/// then searches for the first index where the diversifier produces a valid
+/// Sapling address. This index should be used for all receiver types in a
+/// Unified Address to comply with ZIP-316.
+///
+/// - Parameters:
+///   - seed: The BIP-39 seed (typically 64 bytes)
+///   - coinType: Coin type for derivation (default: 133 for mainnet)
+///   - account: Account index (default: 0)
+/// - Returns: Tuple of (first valid diversifier index, 11-byte diversifier)
+public func deriveFirstValidDiversifierIndex(
+    seed: Data,
+    coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
+    account: UInt32 = 0
+) throws -> (index: UInt64, diversifier: Data) {
+    var index: UInt64 = 0
+    var diversifier = [UInt8](repeating: 0, count: 11)
+
+    let result = seed.withUnsafeBytes { seedPtr in
+        zsig_derive_first_valid_diversifier_index(
+            seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+            seed.count,
+            coinType,
+            account,
+            &index,
+            &diversifier
+        )
+    }
+
+    guard result.rawValue == 0 else {
+        throw ZcashSignerError(code: result.rawValue)
+    }
+
+    return (index: index, diversifier: Data(diversifier))
+}
+
 // MARK: - Transparent Address Derivation
 
 /// Derive a transparent P2PKH address from seed using BIP-44

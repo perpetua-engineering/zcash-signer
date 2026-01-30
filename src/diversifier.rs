@@ -11,11 +11,11 @@ use aes::cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray};
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// Sapling DiversifyHash domain separator (the message prefix)
-const SAPLING_DIVERSIFY_HASH_DOMAIN: &[u8; 8] = b"Zcash_gd";
+/// GroupHash^J personalization for URS generation
+const GH_FIRST_BLOCK_PERSONALIZATION: &[u8; 8] = b"Zcash_gd";
 
-/// Pedersen hash personalization (used for group hashing)
-const PEDERSEN_HASH_PERSONALIZATION: &[u8; 8] = b"Zcash_PH";
+/// BLAKE2s personalization for GroupHash^J (8 bytes for BLAKE2s)
+const BLAKE2S_PERSONALIZATION: &[u8; 8] = b"Zcash_PH";
 
 // -----------------------------------------------------------------------------
 // FF1-AES256 Implementation
@@ -239,8 +239,6 @@ pub fn derive_diversifier(dk: &[u8; 32], index: u64) -> [u8; 11] {
 /// 3. Clear cofactor (multiply by 8)
 /// 4. Valid if result is not identity
 pub fn is_valid_sapling_diversifier(diversifier: &[u8; 11]) -> bool {
-    use blake2::Blake2s256;
-    use blake2::digest::Digest;
     use group::cofactor::CofactorGroup;
     use group::Group;
     use jubjub::{AffinePoint, ExtendedPoint};
@@ -249,25 +247,19 @@ pub fn is_valid_sapling_diversifier(diversifier: &[u8; 11]) -> bool {
     // Uses BLAKE2s-256 with "Zcash_PH" personalization
     // Input is D || M = "Zcash_gd" || diversifier
 
-    // Note: blake2 crate doesn't support personalization directly,
-    // so we use the standard BLAKE2s and prepend the personalization to input
-    // This is NOT the same as the Zcash spec which uses actual personalization.
-    // For proper implementation, we'd need blake2s_simd or similar.
-
     // Build input: domain || diversifier
     let mut input = [0u8; 19]; // 8 + 11
-    input[..8].copy_from_slice(SAPLING_DIVERSIFY_HASH_DOMAIN);
+    input[..8].copy_from_slice(GH_FIRST_BLOCK_PERSONALIZATION);
     input[8..].copy_from_slice(diversifier);
 
-    // For now, use a simplified hash (this may not match exactly)
-    // TODO: Use blake2s_simd with proper personalization for exact match
-    let mut hasher = Blake2s256::new();
-    hasher.update(PEDERSEN_HASH_PERSONALIZATION);
-    hasher.update(&input);
-    let hash = hasher.finalize();
+    // BLAKE2s-256 with proper personalization
+    let hash = blake2s_simd::Params::new()
+        .hash_length(32)
+        .personal(BLAKE2S_PERSONALIZATION)
+        .hash(&input);
 
     // Try to interpret the hash as a compressed Jubjub point
-    let point_bytes: [u8; 32] = hash.into();
+    let point_bytes: [u8; 32] = hash.as_bytes().try_into().unwrap();
     let point_opt = AffinePoint::from_bytes(point_bytes);
     if point_opt.is_none().into() {
         return false;

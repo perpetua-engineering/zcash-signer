@@ -31,14 +31,34 @@ struct CompareAddressCommand: AsyncParsableCommand {
         let seed = try SeedManager.parseSeed()
         errorOutput("[Compare] Parsed seed (\(seed.count) bytes)")
 
-        // === Method 1: Our Rust library (BIP-44 index 0) ===
+        // === Find first valid diversifier index using FF1-AES256 ===
+        let (diversifierIndex, diversifier) = try deriveFirstValidDiversifierIndex(
+            seed: seed,
+            coinType: isMainnet ? ZSIG_MAINNET_COIN_TYPE : 1,
+            account: account
+        )
+        errorOutput("[Compare] First valid diversifier index: \(diversifierIndex)")
+        errorOutput("[Compare] Diversifier: \(diversifier.hexString)")
+
+        // === Method 1: Our Rust library (using first valid diversifier index) ===
         let rustTransparentAddress = try deriveTransparentAddress(
+            seed: seed,
+            account: account,
+            index: UInt32(diversifierIndex),
+            mainnet: isMainnet
+        )
+        errorOutput("[Compare] Rust BIP-44 index \(diversifierIndex): \(rustTransparentAddress)")
+
+        // For comparison, also show index 0 address
+        let rustIndex0Address = try deriveTransparentAddress(
             seed: seed,
             account: account,
             index: 0,
             mainnet: isMainnet
         )
-        errorOutput("[Compare] Rust BIP-44 index 0: \(rustTransparentAddress)")
+        if diversifierIndex != 0 {
+            errorOutput("[Compare] Rust BIP-44 index 0 (for reference): \(rustIndex0Address)")
+        }
 
         // === Method 2: SDK - derive UFVK and extract transparent receiver ===
         let zcashNetwork = isMainnet
@@ -61,20 +81,20 @@ struct CompareAddressCommand: AsyncParsableCommand {
             rustAddress: rustTransparentAddress,
             sdkAddress: sdkTransparentAddress.stringEncoded,
             match: match,
+            diversifierIndex: diversifierIndex,
             unifiedAddress: unifiedAddress.stringEncoded,
             note: match
-                ? "Addresses match - diversifier index 0 is valid for this seed"
-                : "Addresses differ - SDK uses a different diversifier index (not 0)"
+                ? "Addresses match! FF1-AES256 diversifier derivation working correctly"
+                : "Addresses differ - possible bug in FF1-AES256 or DiversifyHash implementation"
         )
         try outputJSON(output)
 
         // Also print a clear summary to stderr
         if match {
-            errorOutput("[Compare] ✅ MATCH - Both methods produce the same address")
+            errorOutput("[Compare] MATCH - Both methods produce the same address")
         } else {
-            errorOutput("[Compare] ❌ MISMATCH - Addresses differ!")
-            errorOutput("[Compare] This seed's first valid diversifier index is NOT 0")
-            errorOutput("[Compare] To match SDK, implement FF1-AES diversifier derivation")
+            errorOutput("[Compare] MISMATCH - Addresses differ!")
+            errorOutput("[Compare] Debug: Check FF1-AES256 implementation or DiversifyHash")
         }
     }
 }
@@ -83,6 +103,7 @@ struct CompareAddressOutput: Codable {
     let rustAddress: String
     let sdkAddress: String
     let match: Bool
+    let diversifierIndex: UInt64
     let unifiedAddress: String
     let note: String
 }
