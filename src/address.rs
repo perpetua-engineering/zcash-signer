@@ -452,14 +452,6 @@ fn to_jubjub_scalar(bytes: &[u8; 64]) -> JubjubScalar {
     JubjubScalar::from_bytes_wide(bytes)
 }
 
-/// Sapling SpendAuth basepoint on Jubjub curve
-/// This is SPENDING_KEY_GENERATOR from the Zcash protocol spec (group_hash("Zcash_G_", ""))
-/// Extracted from reddsa crate constants.rs
-const SAPLING_SPENDING_KEY_GENERATOR: [u8; 32] = [
-    48, 181, 242, 170, 173, 50, 86, 48, 188, 221, 219, 206, 77, 103, 101, 109, 5, 253, 28, 194,
-    208, 55, 187, 83, 117, 182, 233, 109, 158, 1, 161, 215,
-];
-
 /// Sapling Nullifier proving key basepoint (PROOF_GENERATION_KEY_GENERATOR)
 /// This is H = group_hash("Zcash_H_", "") used for nk = nsk * H
 ///
@@ -472,13 +464,6 @@ const SAPLING_PROOF_GEN_KEY_GENERATOR: [u8; 32] = [
     0xcc, 0x48, 0x49, 0x0f, 0x84, 0x01, 0xc9, 0xde,
     0x7a, 0x2a, 0xdf, 0x18, 0x07, 0xd1, 0xb6, 0xd4, // 0xd4 (sign bit set)
 ];
-
-/// Get Sapling SpendAuth basepoint
-fn sapling_spend_auth_basepoint() -> JubjubPoint {
-    JubjubAffine::from_bytes(SAPLING_SPENDING_KEY_GENERATOR)
-        .expect("Invalid Sapling spending key generator")
-        .into()
-}
 
 /// Get Sapling Proof Generation Key basepoint (for nk derivation)
 fn sapling_proof_gen_basepoint() -> JubjubPoint {

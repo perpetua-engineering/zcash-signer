@@ -58,6 +58,11 @@ name = "verify_rk"
 path = "src/bin/verify_rk.rs"
 required-features = ["debug-tools"]
 
+[[bin]]
+name = "ask_compare"
+path = "src/bin/ask_compare.rs"
+required-features = ["debug-tools"]
+
 [features]
 default = []
 std = []

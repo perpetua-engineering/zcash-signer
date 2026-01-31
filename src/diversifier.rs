@@ -52,7 +52,7 @@ impl Ff1Aes256 {
         // u = floor(88/2) = 44
         // v = 88 - 44 = 44
 
-        let n = 88u32; // Total bits
+        let _n = 88u32; // Total bits (for documentation; u + v)
         let u = 44u32; // Left half bits
         let v = 44u32; // Right half bits
 
