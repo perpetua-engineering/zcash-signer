@@ -23,6 +23,9 @@ public enum ZcashSignerError: Error, LocalizedError {
     case scalarConversionFailed
     case pointConversionFailed
     case bufferTooSmall
+    case pcztParseFailed
+    case pcztSignFailed
+    case pcztInvalidKey
     case unknown(UInt32)
 
     init(code: UInt32) {
@@ -37,6 +40,9 @@ public enum ZcashSignerError: Error, LocalizedError {
         case 7: self = .scalarConversionFailed
         case 8: self = .pointConversionFailed
         case 9: self = .bufferTooSmall
+        case 10: self = .pcztParseFailed
+        case 11: self = .pcztSignFailed
+        case 12: self = .pcztInvalidKey
         default: self = .unknown(code)
         }
     }
@@ -52,6 +58,9 @@ public enum ZcashSignerError: Error, LocalizedError {
         case .scalarConversionFailed: return "Scalar conversion failed"
         case .pointConversionFailed: return "Point conversion failed"
         case .bufferTooSmall: return "Output buffer too small"
+        case .pcztParseFailed: return "Failed to parse PCZT binary"
+        case .pcztSignFailed: return "PCZT signing failed"
+        case .pcztInvalidKey: return "Invalid key for PCZT signing"
         case .unknown(let code): return "Unknown error code: \(code)"
         }
     }
@@ -986,6 +995,132 @@ public func deriveCombinedUFVKString(
     }
 
     return ufvk
+}
+
+// MARK: - PCZT Signing
+
+/// Summary information extracted from a PCZT binary
+public struct ZcashPcztInfo {
+    /// Number of Orchard actions (each is a spend + output)
+    public let orchardActions: UInt32
+    /// Number of Sapling spends
+    public let saplingSpends: UInt32
+    /// Number of transparent inputs
+    public let transparentInputs: UInt32
+    /// Number of transparent outputs
+    public let transparentOutputs: UInt32
+}
+
+/// Extract summary information from a PCZT binary
+///
+/// Parses the PCZT and returns counts of Orchard actions, Sapling spends,
+/// transparent inputs, and transparent outputs. Useful for display on the
+/// watch before the user confirms signing.
+///
+/// - Parameter pcztData: Raw PCZT binary data
+/// - Returns: Summary information about the PCZT contents
+public func pcztInfo(pcztData: Data) throws -> ZcashPcztInfo {
+    var info = ZsigPcztInfo()
+
+    let result = pcztData.withUnsafeBytes { pcztPtr in
+        zsig_pczt_info(
+            pcztPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+            pcztData.count,
+            &info
+        )
+    }
+
+    guard result.rawValue == 0 else {
+        throw ZcashSignerError(code: result.rawValue)
+    }
+
+    return ZcashPcztInfo(
+        orchardActions: info.orchard_actions,
+        saplingSpends: info.sapling_spends,
+        transparentInputs: info.transparent_inputs,
+        transparentOutputs: info.transparent_outputs
+    )
+}
+
+/// Sign a PCZT binary with the provided keys
+///
+/// Parses the PCZT, signs all applicable spend types using the provided
+/// keys, and returns the signed PCZT bytes. Key parameters are optional —
+/// pass nil to skip signing for that protocol.
+///
+/// - Parameters:
+///   - pcztData: Raw PCZT binary data
+///   - sighash: 32-byte transaction sighash (computed by the phone)
+///   - orchardSpendingKey: 32-byte Orchard spending key (nil to skip Orchard signing)
+///   - saplingExpandedSpendingKey: 96-byte Sapling expanded spending key (nil to skip Sapling signing)
+///   - transparentSecretKey: 32-byte secp256k1 secret key (nil to skip transparent signing)
+/// - Returns: Signed PCZT binary data
+public func pcztSign(
+    pcztData: Data,
+    sighash: Data,
+    orchardSpendingKey: Data? = nil,
+    saplingExpandedSpendingKey: Data? = nil,
+    transparentSecretKey: Data? = nil
+) throws -> Data {
+    guard sighash.count == 32 else {
+        throw ZcashSignerError.invalidKey
+    }
+    if let osk = orchardSpendingKey {
+        guard osk.count == 32 else { throw ZcashSignerError.pcztInvalidKey }
+    }
+    if let sesk = saplingExpandedSpendingKey {
+        guard sesk.count == 96 else { throw ZcashSignerError.pcztInvalidKey }
+    }
+    if let tsk = transparentSecretKey {
+        guard tsk.count == 32 else { throw ZcashSignerError.pcztInvalidKey }
+    }
+
+    // Output buffer — signed PCZT is typically same size as input, add margin
+    let outputCapacity = pcztData.count + 4096
+    var output = [UInt8](repeating: 0, count: outputCapacity)
+    var outputLen: Int = 0
+
+    let result = pcztData.withUnsafeBytes { pcztPtr in
+        sighash.withUnsafeBytes { sighashPtr in
+            withOptionalUnsafeBytes(orchardSpendingKey) { orchardPtr in
+                withOptionalUnsafeBytes(saplingExpandedSpendingKey) { saplingPtr in
+                    withOptionalUnsafeBytes(transparentSecretKey) { transparentPtr in
+                        zsig_pczt_sign(
+                            pcztPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                            pcztData.count,
+                            sighashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                            orchardPtr,
+                            saplingPtr,
+                            transparentPtr,
+                            &output,
+                            outputCapacity,
+                            &outputLen,
+                            secureRandomCallback
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    guard result.rawValue == 0 else {
+        throw ZcashSignerError(code: result.rawValue)
+    }
+
+    return Data(output.prefix(outputLen))
+}
+
+/// Helper to pass optional Data as a nullable UnsafePointer to a closure
+private func withOptionalUnsafeBytes<R>(
+    _ data: Data?,
+    _ body: (UnsafePointer<UInt8>?) -> R
+) -> R {
+    guard let data = data else {
+        return body(nil)
+    }
+    return data.withUnsafeBytes { ptr in
+        body(ptr.baseAddress?.assumingMemoryBound(to: UInt8.self))
+    }
 }
 
 // MARK: - RNG Callback
