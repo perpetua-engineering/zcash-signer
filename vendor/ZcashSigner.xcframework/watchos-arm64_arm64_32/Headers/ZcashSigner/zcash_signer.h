@@ -37,6 +37,9 @@ typedef enum {
     ZSIG_ERROR_SCALAR_CONVERSION_FAILED = 7,
     ZSIG_ERROR_POINT_CONVERSION_FAILED = 8,
     ZSIG_ERROR_BUFFER_TOO_SMALL = 9,
+    ZSIG_ERROR_PCZT_PARSE_FAILED = 10,
+    ZSIG_ERROR_PCZT_SIGN_FAILED = 11,
+    ZSIG_ERROR_PCZT_INVALID_KEY = 12,
 } ZsigError;
 
 /* ============================================================================
@@ -833,6 +836,85 @@ int32_t zsig_derive_combined_ufvk_string(const uint8_t* seed,
                                           bool mainnet,
                                           uint8_t* output,
                                           size_t output_len);
+
+/* ============================================================================
+ * PCZT Signing (Partially Created Zcash Transaction)
+ * ============================================================================ */
+
+/*
+ * PCZT summary information returned by zsig_pczt_info
+ */
+typedef struct {
+    uint32_t orchard_actions;
+    uint32_t sapling_spends;
+    uint32_t transparent_inputs;
+    uint32_t transparent_outputs;
+} ZsigPcztInfo;
+
+/*
+ * Extract summary information from a PCZT binary
+ *
+ * Parses the PCZT and returns counts of Orchard actions, Sapling spends,
+ * transparent inputs, and transparent outputs. Useful for display on the
+ * watch before the user confirms signing.
+ *
+ * Parameters:
+ *   pczt_data: Pointer to raw PCZT binary data
+ *   pczt_len: Length of PCZT data (max 1 MB)
+ *   info_out: Pointer to receive the PCZT info (must not be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success
+ *   ZSIG_ERROR_NULL_POINTER if any required pointer is NULL
+ *   ZSIG_ERROR_BUFFER_TOO_SMALL if pczt_len is 0 or > 1MB
+ *   ZSIG_ERROR_PCZT_PARSE_FAILED if the PCZT binary is invalid
+ */
+ZsigError zsig_pczt_info(const uint8_t* pczt_data,
+                          size_t pczt_len,
+                          ZsigPcztInfo* info_out);
+
+/*
+ * Sign a PCZT binary with the provided keys
+ *
+ * Parses the PCZT, signs all applicable spend types using the provided
+ * keys, and writes the signed PCZT to the output buffer. Key pointers
+ * are optional — pass NULL to skip signing for that protocol.
+ *
+ * The signed PCZT is typically the same size as the input (signatures
+ * replace placeholder bytes). If output_len is too small, returns
+ * ZSIG_ERROR_BUFFER_TOO_SMALL and writes the required size to
+ * output_len_out.
+ *
+ * Parameters:
+ *   pczt_data: Pointer to raw PCZT binary data
+ *   pczt_len: Length of PCZT data (max 1 MB)
+ *   sighash: Pointer to 32-byte transaction sighash (must not be NULL)
+ *   orchard_sk: Pointer to 32-byte Orchard spending key (NULL to skip)
+ *   sapling_esk: Pointer to 96-byte Sapling expanded spending key (NULL to skip)
+ *   transparent_sk: Pointer to 32-byte secp256k1 secret key (NULL to skip)
+ *   output: Buffer for signed PCZT output
+ *   output_len: Size of output buffer
+ *   output_len_out: Receives actual length of signed PCZT
+ *   rng: Callback function for random number generation
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success
+ *   ZSIG_ERROR_NULL_POINTER if pczt_data, sighash, output, or output_len_out is NULL
+ *   ZSIG_ERROR_BUFFER_TOO_SMALL if output_len is insufficient (check output_len_out)
+ *   ZSIG_ERROR_PCZT_PARSE_FAILED if the PCZT binary is invalid
+ *   ZSIG_ERROR_PCZT_INVALID_KEY if a provided key is malformed
+ *   ZSIG_ERROR_PCZT_SIGN_FAILED if signing fails
+ */
+ZsigError zsig_pczt_sign(const uint8_t* pczt_data,
+                          size_t pczt_len,
+                          const uint8_t* sighash,
+                          const uint8_t* orchard_sk,
+                          const uint8_t* sapling_esk,
+                          const uint8_t* transparent_sk,
+                          uint8_t* output,
+                          size_t output_len,
+                          size_t* output_len_out,
+                          ZsigRngCallback rng);
 
 /* ============================================================================
  * Utility Functions
