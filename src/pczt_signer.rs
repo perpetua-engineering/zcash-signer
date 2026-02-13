@@ -232,3 +232,150 @@ pub struct PcztInfo {
     /// Number of transparent outputs.
     pub transparent_outputs: usize,
 }
+
+// =============================================================================
+// C FFI
+// =============================================================================
+
+use core::slice;
+use crate::{CallbackRng, ZsigError, ZsigRngCallback};
+
+/// PCZT info returned by `zsig_pczt_info`.
+#[repr(C)]
+pub struct ZsigPcztInfo {
+    pub orchard_actions: u32,
+    pub sapling_spends: u32,
+    pub transparent_inputs: u32,
+    pub transparent_outputs: u32,
+}
+
+/// Maximum PCZT payload size (1 MB). Anything larger is rejected.
+const MAX_PCZT_LEN: usize = 1024 * 1024;
+
+/// Extract summary information from a PCZT binary.
+///
+/// # Safety
+/// - `pczt_data` must point to `pczt_len` readable bytes
+/// - `info_out` must point to a valid `ZsigPcztInfo`
+#[no_mangle]
+pub unsafe extern "C" fn zsig_pczt_info(
+    pczt_data: *const u8,
+    pczt_len: usize,
+    info_out: *mut ZsigPcztInfo,
+) -> ZsigError {
+    if pczt_data.is_null() || info_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+    if pczt_len == 0 || pczt_len > MAX_PCZT_LEN {
+        return ZsigError::BufferTooSmall;
+    }
+
+    let pczt_bytes = slice::from_raw_parts(pczt_data, pczt_len);
+
+    match pczt_info(pczt_bytes) {
+        Ok(info) => {
+            (*info_out).orchard_actions = info.orchard_actions as u32;
+            (*info_out).sapling_spends = info.sapling_spends as u32;
+            (*info_out).transparent_inputs = info.transparent_inputs as u32;
+            (*info_out).transparent_outputs = info.transparent_outputs as u32;
+            ZsigError::Success
+        }
+        Err(_) => ZsigError::PcztParseFailed,
+    }
+}
+
+/// Sign a PCZT binary with the provided keys.
+///
+/// All key pointers are optional — pass NULL to skip signing for that protocol.
+/// The signed PCZT is written to `output` and the actual length is written to
+/// `output_len_out`. If `output_len` is too small, returns `BufferTooSmall` and
+/// writes the required length to `output_len_out`.
+///
+/// # Safety
+/// - `pczt_data` must point to `pczt_len` readable bytes
+/// - `sighash` must point to 32 readable bytes
+/// - `orchard_sk` if non-null must point to 32 readable bytes (Orchard spending key)
+/// - `sapling_esk` if non-null must point to 96 readable bytes (Sapling expanded SK)
+/// - `transparent_sk` if non-null must point to 32 readable bytes (secp256k1 secret key)
+/// - `output` must point to `output_len` writable bytes
+/// - `output_len_out` must point to a writable `usize`
+/// - `rng_callback` must be a valid RNG function pointer
+#[no_mangle]
+pub unsafe extern "C" fn zsig_pczt_sign(
+    pczt_data: *const u8,
+    pczt_len: usize,
+    sighash: *const u8,
+    orchard_sk: *const u8,
+    sapling_esk: *const u8,
+    transparent_sk: *const u8,
+    output: *mut u8,
+    output_len: usize,
+    output_len_out: *mut usize,
+    rng_callback: ZsigRngCallback,
+) -> ZsigError {
+    if pczt_data.is_null() || sighash.is_null() || output.is_null() || output_len_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+    if pczt_len == 0 || pczt_len > MAX_PCZT_LEN {
+        return ZsigError::BufferTooSmall;
+    }
+
+    let pczt_bytes = slice::from_raw_parts(pczt_data, pczt_len);
+    let sighash_bytes: [u8; 32] = slice::from_raw_parts(sighash, 32)
+        .try_into()
+        .unwrap();
+
+    // Build optional key references from nullable pointers.
+    let orchard_key: Option<[u8; 32]> = if orchard_sk.is_null() {
+        None
+    } else {
+        Some(slice::from_raw_parts(orchard_sk, 32).try_into().unwrap())
+    };
+
+    let sapling_key: Option<[u8; 96]> = if sapling_esk.is_null() {
+        None
+    } else {
+        Some(slice::from_raw_parts(sapling_esk, 96).try_into().unwrap())
+    };
+
+    let transparent_key: Option<[u8; 32]> = if transparent_sk.is_null() {
+        None
+    } else {
+        Some(slice::from_raw_parts(transparent_sk, 32).try_into().unwrap())
+    };
+
+    let keys = PcztSigningKeys {
+        orchard_sk: orchard_key.as_ref(),
+        sapling_esk: sapling_key.as_ref(),
+        transparent_sk: transparent_key.as_ref(),
+    };
+
+    let rng = CallbackRng::new(rng_callback);
+
+    let signed = match sign_pczt(pczt_bytes, sighash_bytes, &keys, rng) {
+        Ok(v) => v,
+        Err(e) => {
+            return match e {
+                PcztSignError::ParseFailed => ZsigError::PcztParseFailed,
+                PcztSignError::InvalidOrchardKey
+                | PcztSignError::InvalidSaplingKey
+                | PcztSignError::InvalidTransparentKey => ZsigError::PcztInvalidKey,
+                PcztSignError::OrchardSignFailed
+                | PcztSignError::SaplingSignFailed
+                | PcztSignError::TransparentSignFailed => ZsigError::PcztSignFailed,
+            };
+        }
+    };
+
+    // Write the actual output length so the caller knows what to expect.
+    *output_len_out = signed.len();
+
+    if output_len < signed.len() {
+        return ZsigError::BufferTooSmall;
+    }
+
+    let out_slice = slice::from_raw_parts_mut(output, signed.len());
+    out_slice.copy_from_slice(&signed);
+
+    ZsigError::Success
+}
