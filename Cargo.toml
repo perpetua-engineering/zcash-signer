@@ -51,15 +51,14 @@ hex = { version = "0.4", optional = true }
 
 # PCZT (Partially Created Zcash Transaction) support for watch-side signing
 # Uses the full Signer role which computes sighash internally from the PCZT data.
-# Features: orchard/sapling/transparent for bundle parsing, signer for v5_signature_hash
-pczt = { version = "0.3", default-features = false, features = ["orchard", "sapling", "transparent", "signer"], optional = true }
+# Must match the pczt version used by zcash-light-client-ffi (same librustzcash rev).
+pczt = { git = "https://github.com/zcash/librustzcash.git", rev = "5cb2658d09f629417b2e2cec5d719ebc71249721", default-features = false, features = ["orchard", "sapling", "transparent", "signer"], optional = true }
 
 # PCZT signing deps: upstream protocol crates for constructing key types in signing callbacks
-# These match the versions pczt 0.3 depends on; "upstream-orchard" avoids naming conflict
-# with the perpetua fork used by debug-tools
-upstream-orchard = { package = "orchard", version = "0.11", default-features = false, optional = true }
-sapling-crypto = { version = "0.5", default-features = false, optional = true }
-zcash_transparent = { version = "0.3", default-features = false, features = ["transparent-inputs"], optional = true }
+# "upstream-orchard" avoids naming conflict with the perpetua fork used by debug-tools
+upstream-orchard = { package = "orchard", version = "0.12", default-features = false, optional = true }
+sapling-crypto = { version = "0.6", default-features = false, optional = true }
+zcash_transparent = { git = "https://github.com/zcash/librustzcash.git", rev = "5cb2658d09f629417b2e2cec5d719ebc71249721", default-features = false, features = ["transparent-inputs"], optional = true }
 secp256k1 = { version = "0.29", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
