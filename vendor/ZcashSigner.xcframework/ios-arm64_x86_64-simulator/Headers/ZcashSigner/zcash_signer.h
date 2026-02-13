@@ -519,15 +519,18 @@ ZsigError zsig_derive_transparent_pubkey_hash(const uint8_t* seed,
  *   seed: BIP-39 seed bytes
  *   seed_len: Length of seed (usually 64)
  *   derivation_path: BIP-32 derivation path components with hardened bits
- *   path_len: Number of path components (usually 5)
+ *   path_len: Number of path components (usually 5, max 10)
  *   sighash: 32-byte sighash to sign
  *   sighash_type: Sighash type (usually 0x01 for SIGHASH_ALL)
- *   signature_out: Output buffer for DER signature (at least 72 bytes)
- *   signature_len_out: Output for actual signature length
+ *   signature_out: Output buffer for DER signature
+ *   signature_out_len: Size of signature output buffer (must be >= 72)
+ *   signature_len_out: Output for actual signature length written
  *   pubkey_out: Output buffer for compressed pubkey (33 bytes)
  *
  * Returns:
  *   ZSIG_SUCCESS on success, error code on failure
+ *   ZSIG_ERROR_BUFFER_TOO_SMALL if signature_out_len < 72
+ *   ZSIG_ERROR_INVALID_KEY if path_len is 0 or > 10
  */
 ZsigError zsig_sign_transparent(const uint8_t* seed,
                                  size_t seed_len,
@@ -536,6 +539,7 @@ ZsigError zsig_sign_transparent(const uint8_t* seed,
                                  const uint8_t* sighash,
                                  uint8_t sighash_type,
                                  uint8_t* signature_out,
+                                 size_t signature_out_len,
                                  size_t* signature_len_out,
                                  uint8_t* pubkey_out);
 

@@ -49,6 +49,11 @@ orchard = { git = "https://github.com/perpetua-engineering/orchard", branch = "p
 zip32 = { version = "0.2.0", default-features = false, optional = true }
 hex = { version = "0.4", optional = true }
 
+# PCZT (Partially Created Zcash Transaction) support for watch-side signing
+# Uses the low_level_signer role - designed for dependency-constrained environments
+# Features: orchard/sapling/transparent enable sign_*_with methods on the low-level signer
+pczt = { version = "0.3", default-features = false, features = ["orchard", "sapling", "transparent"], optional = true }
+
 [dev-dependencies]
 # For validation against reference implementations
 hex = "0.4"
@@ -66,6 +71,7 @@ required-features = ["debug-tools"]
 [features]
 default = []
 std = []
+pczt-signer = ["dep:pczt"]
 debug-tools = ["dep:bip39", "dep:orchard", "dep:zip32", "dep:hex", "std"]
 
 [profile.release]
