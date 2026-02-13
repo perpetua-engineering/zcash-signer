@@ -19,6 +19,8 @@ extern crate alloc;
 mod address;
 mod diversifier;
 mod keys;
+#[cfg(feature = "pczt-signer")]
+pub mod pczt_signer;
 mod signing;
 mod transparent;
 
