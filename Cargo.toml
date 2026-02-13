@@ -54,6 +54,14 @@ hex = { version = "0.4", optional = true }
 # Features: orchard/sapling/transparent enable sign_*_with methods on the low-level signer
 pczt = { version = "0.3", default-features = false, features = ["orchard", "sapling", "transparent"], optional = true }
 
+# PCZT signing deps: upstream protocol crates for constructing key types in signing callbacks
+# These match the versions pczt 0.3 depends on; "upstream-orchard" avoids naming conflict
+# with the perpetua fork used by debug-tools
+upstream-orchard = { package = "orchard", version = "0.11", default-features = false, optional = true }
+sapling-crypto = { version = "0.5", default-features = false, optional = true }
+zcash_transparent = { version = "0.3", default-features = false, features = ["transparent-inputs"], optional = true }
+secp256k1 = { version = "0.29", default-features = false, features = ["alloc"], optional = true }
+
 [dev-dependencies]
 # For validation against reference implementations
 hex = "0.4"
@@ -71,7 +79,7 @@ required-features = ["debug-tools"]
 [features]
 default = []
 std = []
-pczt-signer = ["dep:pczt"]
+pczt-signer = ["dep:pczt", "dep:upstream-orchard", "dep:sapling-crypto", "dep:zcash_transparent", "dep:secp256k1"]
 debug-tools = ["dep:bip39", "dep:orchard", "dep:zip32", "dep:hex", "std"]
 
 [profile.release]
