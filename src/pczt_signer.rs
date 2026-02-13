@@ -1,17 +1,17 @@
 //! PCZT (Partially Created Zcash Transaction) signing module.
 //!
-//! Uses the pczt crate's `low_level_signer` role to parse PCZT binary,
-//! sign all spend types (Orchard/Sapling/transparent), and return signed
-//! PCZT bytes.
+//! Uses the pczt crate's full `Signer` role to parse PCZT binary,
+//! compute the sighash internally, sign all spend types (Orchard/Sapling/
+//! transparent), and return signed PCZT bytes.
 //!
-//! The watch receives PCZT bytes + sighash from the phone, signs with
-//! locally-held spending keys, and returns the signed PCZT.
+//! The watch receives PCZT bytes from the phone, signs with locally-held
+//! spending keys, and returns the signed PCZT. The sighash is computed
+//! from the PCZT data itself — no external sighash parameter needed.
 
 use alloc::vec::Vec;
 use core::fmt;
 
-use pczt::roles::low_level_signer::Signer;
-use rand_core::{CryptoRng, RngCore};
+use pczt::roles::signer::Signer;
 
 // Re-export the upstream protocol crates' key types under clearer names.
 // "upstream_orchard" is the package rename for the crates.io orchard crate
@@ -33,7 +33,7 @@ pub enum PcztSignError {
     ParseFailed,
     /// Invalid Orchard spending key bytes.
     InvalidOrchardKey,
-    /// Invalid Sapling expanded spending key bytes.
+    /// Invalid Sapling spending key bytes.
     InvalidSaplingKey,
     /// Invalid transparent secret key bytes.
     InvalidTransparentKey,
@@ -50,43 +50,12 @@ impl fmt::Display for PcztSignError {
         match self {
             Self::ParseFailed => write!(f, "failed to parse PCZT binary"),
             Self::InvalidOrchardKey => write!(f, "invalid Orchard spending key"),
-            Self::InvalidSaplingKey => write!(f, "invalid Sapling expanded spending key"),
+            Self::InvalidSaplingKey => write!(f, "invalid Sapling spending key"),
             Self::InvalidTransparentKey => write!(f, "invalid transparent secret key"),
             Self::OrchardSignFailed => write!(f, "Orchard signing failed"),
             Self::SaplingSignFailed => write!(f, "Sapling signing failed"),
             Self::TransparentSignFailed => write!(f, "transparent signing failed"),
         }
-    }
-}
-
-// Bridge error type that satisfies the From<ParseError> bounds required by
-// the low_level_signer callbacks. Inner values retained for Debug output.
-#[derive(Debug)]
-#[allow(dead_code)]
-enum InternalSignError {
-    Orchard(upstream_orchard::pczt::SignerError),
-    OrchardParse(upstream_orchard::pczt::ParseError),
-    Sapling(sapling_crypto::pczt::SignerError),
-    SaplingParse(sapling_crypto::pczt::ParseError),
-    Transparent(zcash_transparent::pczt::SignerError),
-    TransparentParse(zcash_transparent::pczt::ParseError),
-}
-
-impl From<upstream_orchard::pczt::ParseError> for InternalSignError {
-    fn from(e: upstream_orchard::pczt::ParseError) -> Self {
-        Self::OrchardParse(e)
-    }
-}
-
-impl From<sapling_crypto::pczt::ParseError> for InternalSignError {
-    fn from(e: sapling_crypto::pczt::ParseError) -> Self {
-        Self::SaplingParse(e)
-    }
-}
-
-impl From<zcash_transparent::pczt::ParseError> for InternalSignError {
-    fn from(e: zcash_transparent::pczt::ParseError) -> Self {
-        Self::TransparentParse(e)
     }
 }
 
@@ -99,10 +68,25 @@ impl From<zcash_transparent::pczt::ParseError> for InternalSignError {
 pub struct PcztSigningKeys<'a> {
     /// Orchard spending key (32 bytes). Used to derive ask for signing.
     pub orchard_sk: Option<&'a [u8; 32]>,
-    /// Sapling expanded spending key (96 bytes: ask || nsk || ovk).
-    pub sapling_esk: Option<&'a [u8; 96]>,
+    /// Sapling spend authorization key "ask" (32-byte scalar on Jubjub).
+    /// Internally wrapped in an ExpandedSpendingKey to satisfy the API.
+    pub sapling_ask: Option<&'a [u8; 32]>,
     /// Transparent secp256k1 secret key (32 bytes).
     pub transparent_sk: Option<&'a [u8; 32]>,
+}
+
+/// Construct a SaplingExpandedSpendingKey from just the ask bytes.
+///
+/// The full ExpandedSpendingKey is 96 bytes (ask || nsk || ovk), but for
+/// signing we only need ask. We pad nsk and ovk with zeros — they're not
+/// used during PCZT signing.
+fn sapling_esk_from_ask(ask_bytes: &[u8; 32]) -> Result<SaplingExpandedSpendingKey, PcztSignError> {
+    let mut esk_bytes = [0u8; 96];
+    esk_bytes[..32].copy_from_slice(ask_bytes);
+    // nsk = 0 (valid Jubjub scalar), ovk = 0 (arbitrary 32 bytes)
+    // Neither is used by sign_sapling — only ask matters.
+    SaplingExpandedSpendingKey::from_bytes(&esk_bytes)
+        .map_err(|_| PcztSignError::InvalidSaplingKey)
 }
 
 // -----------------------------------------------------------------------------
@@ -111,25 +95,29 @@ pub struct PcztSigningKeys<'a> {
 
 /// Parse PCZT binary, sign all applicable spend types, and return signed PCZT bytes.
 ///
+/// Uses the full Signer role which computes the sighash internally from the
+/// PCZT data. No external sighash parameter is needed.
+///
 /// # Arguments
 /// * `pczt_bytes` - Raw PCZT binary (with PCZT magic header)
-/// * `sighash` - 32-byte transaction sighash (computed by the phone)
 /// * `keys` - Signing keys for each protocol
-/// * `rng` - Cryptographic RNG for signature randomness
 ///
 /// # Returns
 /// Signed PCZT binary bytes, or an error if signing fails.
-pub fn sign_pczt<R: RngCore + CryptoRng>(
+pub fn sign_pczt(
     pczt_bytes: &[u8],
-    sighash: [u8; 32],
     keys: &PcztSigningKeys,
-    mut rng: R,
 ) -> Result<Vec<u8>, PcztSignError> {
     // Parse the PCZT binary.
     let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|_| PcztSignError::ParseFailed)?;
 
-    // Create the low-level signer.
-    let mut signer = Signer::new(pczt);
+    // Get spend counts before constructing Signer (which takes ownership).
+    let orchard_count = pczt.orchard().actions().len();
+    let sapling_count = pczt.sapling().spends().len();
+    let transparent_count = pczt.transparent().inputs().len();
+
+    // Create the full Signer (computes sighash from PCZT data).
+    let mut signer = Signer::new(pczt).map_err(|_| PcztSignError::ParseFailed)?;
 
     // Sign Orchard spends if we have an Orchard key.
     if let Some(sk_bytes) = keys.orchard_sk {
@@ -138,67 +126,50 @@ pub fn sign_pczt<R: RngCore + CryptoRng>(
             Option::from(sk).ok_or(PcztSignError::InvalidOrchardKey)?;
         let ask = OrchardSpendAuthorizingKey::from(&sk);
 
-        signer = signer
-            .sign_orchard_with(
-                |_pczt, bundle, _tx_modifiable| -> Result<(), InternalSignError> {
-                    for action in bundle.actions_mut() {
-                        // Only sign actions that have an alpha (spend authorization
-                        // randomizer). Actions without alpha are dummy spends.
-                        if action.spend().alpha().is_some() {
-                            action
-                                .sign(sighash, &ask, &mut rng)
-                                .map_err(InternalSignError::Orchard)?;
-                        }
-                    }
-                    Ok(())
-                },
-            )
-            .map_err(|_| PcztSignError::OrchardSignFailed)?;
+        for i in 0..orchard_count {
+            // sign_orchard returns WrongSpendAuthorizingKey if rk doesn't
+            // match — this happens for dummy spends (IO-finalized actions).
+            // We skip those silently, just like the low_level_signer checked
+            // alpha().is_some().
+            match signer.sign_orchard(i, &ask) {
+                Ok(()) => {}
+                Err(pczt::roles::signer::Error::OrchardSign(
+                    upstream_orchard::pczt::SignerError::WrongSpendAuthorizingKey,
+                )) => {
+                    // Dummy spend or action we don't own — skip.
+                }
+                Err(_) => return Err(PcztSignError::OrchardSignFailed),
+            }
+        }
     }
 
     // Sign Sapling spends if we have a Sapling key.
-    if let Some(esk_bytes) = keys.sapling_esk {
-        let esk = SaplingExpandedSpendingKey::from_bytes(esk_bytes)
-            .map_err(|_| PcztSignError::InvalidSaplingKey)?;
+    if let Some(ask_bytes) = keys.sapling_ask {
+        let esk = sapling_esk_from_ask(ask_bytes)?;
 
-        signer = signer
-            .sign_sapling_with(
-                |_pczt, bundle, _tx_modifiable| -> Result<(), InternalSignError> {
-                    for spend in bundle.spends_mut() {
-                        if spend.alpha().is_some() {
-                            spend
-                                .sign(sighash, &esk.ask, &mut rng)
-                                .map_err(InternalSignError::Sapling)?;
-                        }
-                    }
-                    Ok(())
-                },
-            )
-            .map_err(|_| PcztSignError::SaplingSignFailed)?;
+        for i in 0..sapling_count {
+            match signer.sign_sapling(i, &esk.ask) {
+                Ok(()) => {}
+                Err(pczt::roles::signer::Error::SaplingSign(
+                    sapling_crypto::pczt::SignerError::WrongSpendAuthorizingKey,
+                )) => {
+                    // Skip spends we don't own.
+                }
+                Err(_) => return Err(PcztSignError::SaplingSignFailed),
+            }
+        }
     }
 
     // Sign transparent inputs if we have a transparent key.
     if let Some(sk_bytes) = keys.transparent_sk {
         let sk = secp256k1::SecretKey::from_slice(sk_bytes)
             .map_err(|_| PcztSignError::InvalidTransparentKey)?;
-        let secp = secp256k1::Secp256k1::signing_only();
 
-        signer = signer
-            .sign_transparent_with(
-                |_pczt, bundle, _tx_modifiable| -> Result<(), InternalSignError> {
-                    for (index, input) in bundle.inputs_mut().iter_mut().enumerate() {
-                        // For transparent inputs, the sighash computation depends on
-                        // the input. In the common SIGHASH_ALL case, the phone
-                        // pre-computes and sends one sighash. We pass it through
-                        // the closure, ignoring the SignableInput details.
-                        input
-                            .sign(index, |_signable_input| sighash, &sk, &secp)
-                            .map_err(InternalSignError::Transparent)?;
-                    }
-                    Ok(())
-                },
-            )
-            .map_err(|_| PcztSignError::TransparentSignFailed)?;
+        for i in 0..transparent_count {
+            signer
+                .sign_transparent(i, &sk)
+                .map_err(|_| PcztSignError::TransparentSignFailed)?;
+        }
     }
 
     // Finalize and serialize.
@@ -238,7 +209,7 @@ pub struct PcztInfo {
 // =============================================================================
 
 use core::slice;
-use crate::{CallbackRng, ZsigError, ZsigRngCallback};
+use crate::{ZsigError, ZsigRngCallback};
 
 /// PCZT info returned by `zsig_pczt_info`.
 #[repr(C)]
@@ -286,6 +257,10 @@ pub unsafe extern "C" fn zsig_pczt_info(
 
 /// Sign a PCZT binary with the provided keys.
 ///
+/// The sighash is computed internally from the PCZT data — no external
+/// sighash parameter is needed. The `sighash` parameter is accepted for
+/// backwards compatibility but is ignored.
+///
 /// All key pointers are optional — pass NULL to skip signing for that protocol.
 /// The signed PCZT is written to `output` and the actual length is written to
 /// `output_len_out`. If `output_len` is too small, returns `BufferTooSmall` and
@@ -293,27 +268,30 @@ pub unsafe extern "C" fn zsig_pczt_info(
 ///
 /// # Safety
 /// - `pczt_data` must point to `pczt_len` readable bytes
-/// - `sighash` must point to 32 readable bytes
+/// - `sighash` may be NULL (ignored, kept for ABI compatibility)
 /// - `orchard_sk` if non-null must point to 32 readable bytes (Orchard spending key)
-/// - `sapling_esk` if non-null must point to 96 readable bytes (Sapling expanded SK)
+/// - `sapling_ask` if non-null must point to 32 readable bytes (Sapling ask)
 /// - `transparent_sk` if non-null must point to 32 readable bytes (secp256k1 secret key)
 /// - `output` must point to `output_len` writable bytes
 /// - `output_len_out` must point to a writable `usize`
-/// - `rng_callback` must be a valid RNG function pointer
+/// - `rng_callback` is ignored (kept for ABI compatibility)
 #[no_mangle]
 pub unsafe extern "C" fn zsig_pczt_sign(
     pczt_data: *const u8,
     pczt_len: usize,
     sighash: *const u8,
     orchard_sk: *const u8,
-    sapling_esk: *const u8,
+    sapling_ask: *const u8,
     transparent_sk: *const u8,
     output: *mut u8,
     output_len: usize,
     output_len_out: *mut usize,
-    rng_callback: ZsigRngCallback,
+    _rng_callback: ZsigRngCallback,
 ) -> ZsigError {
-    if pczt_data.is_null() || sighash.is_null() || output.is_null() || output_len_out.is_null() {
+    // sighash and rng_callback are kept for ABI compatibility but ignored.
+    let _ = sighash;
+
+    if pczt_data.is_null() || output.is_null() || output_len_out.is_null() {
         return ZsigError::NullPointer;
     }
     if pczt_len == 0 || pczt_len > MAX_PCZT_LEN {
@@ -321,9 +299,6 @@ pub unsafe extern "C" fn zsig_pczt_sign(
     }
 
     let pczt_bytes = slice::from_raw_parts(pczt_data, pczt_len);
-    let sighash_bytes: [u8; 32] = slice::from_raw_parts(sighash, 32)
-        .try_into()
-        .unwrap();
 
     // Build optional key references from nullable pointers.
     let orchard_key: Option<[u8; 32]> = if orchard_sk.is_null() {
@@ -332,10 +307,10 @@ pub unsafe extern "C" fn zsig_pczt_sign(
         Some(slice::from_raw_parts(orchard_sk, 32).try_into().unwrap())
     };
 
-    let sapling_key: Option<[u8; 96]> = if sapling_esk.is_null() {
+    let sapling_key: Option<[u8; 32]> = if sapling_ask.is_null() {
         None
     } else {
-        Some(slice::from_raw_parts(sapling_esk, 96).try_into().unwrap())
+        Some(slice::from_raw_parts(sapling_ask, 32).try_into().unwrap())
     };
 
     let transparent_key: Option<[u8; 32]> = if transparent_sk.is_null() {
@@ -346,13 +321,11 @@ pub unsafe extern "C" fn zsig_pczt_sign(
 
     let keys = PcztSigningKeys {
         orchard_sk: orchard_key.as_ref(),
-        sapling_esk: sapling_key.as_ref(),
+        sapling_ask: sapling_key.as_ref(),
         transparent_sk: transparent_key.as_ref(),
     };
 
-    let rng = CallbackRng::new(rng_callback);
-
-    let signed = match sign_pczt(pczt_bytes, sighash_bytes, &keys, rng) {
+    let signed = match sign_pczt(pczt_bytes, &keys) {
         Ok(v) => v,
         Err(e) => {
             return match e {

@@ -1045,31 +1045,27 @@ public func pcztInfo(pcztData: Data) throws -> ZcashPcztInfo {
 /// Sign a PCZT binary with the provided keys
 ///
 /// Parses the PCZT, signs all applicable spend types using the provided
-/// keys, and returns the signed PCZT bytes. Key parameters are optional —
-/// pass nil to skip signing for that protocol.
+/// keys, and returns the signed PCZT bytes. The sighash is computed
+/// internally from the PCZT data. Key parameters are optional — pass nil
+/// to skip signing for that protocol.
 ///
 /// - Parameters:
 ///   - pcztData: Raw PCZT binary data
-///   - sighash: 32-byte transaction sighash (computed by the phone)
 ///   - orchardSpendingKey: 32-byte Orchard spending key (nil to skip Orchard signing)
-///   - saplingExpandedSpendingKey: 96-byte Sapling expanded spending key (nil to skip Sapling signing)
+///   - saplingAsk: 32-byte Sapling spend authorizing key (nil to skip Sapling signing)
 ///   - transparentSecretKey: 32-byte secp256k1 secret key (nil to skip transparent signing)
 /// - Returns: Signed PCZT binary data
 public func pcztSign(
     pcztData: Data,
-    sighash: Data,
     orchardSpendingKey: Data? = nil,
-    saplingExpandedSpendingKey: Data? = nil,
+    saplingAsk: Data? = nil,
     transparentSecretKey: Data? = nil
 ) throws -> Data {
-    guard sighash.count == 32 else {
-        throw ZcashSignerError.invalidKey
-    }
     if let osk = orchardSpendingKey {
         guard osk.count == 32 else { throw ZcashSignerError.pcztInvalidKey }
     }
-    if let sesk = saplingExpandedSpendingKey {
-        guard sesk.count == 96 else { throw ZcashSignerError.pcztInvalidKey }
+    if let sask = saplingAsk {
+        guard sask.count == 32 else { throw ZcashSignerError.pcztInvalidKey }
     }
     if let tsk = transparentSecretKey {
         guard tsk.count == 32 else { throw ZcashSignerError.pcztInvalidKey }
@@ -1081,23 +1077,21 @@ public func pcztSign(
     var outputLen: Int = 0
 
     let result = pcztData.withUnsafeBytes { pcztPtr in
-        sighash.withUnsafeBytes { sighashPtr in
-            withOptionalUnsafeBytes(orchardSpendingKey) { orchardPtr in
-                withOptionalUnsafeBytes(saplingExpandedSpendingKey) { saplingPtr in
-                    withOptionalUnsafeBytes(transparentSecretKey) { transparentPtr in
-                        zsig_pczt_sign(
-                            pcztPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                            pcztData.count,
-                            sighashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                            orchardPtr,
-                            saplingPtr,
-                            transparentPtr,
-                            &output,
-                            outputCapacity,
-                            &outputLen,
-                            secureRandomCallback
-                        )
-                    }
+        withOptionalUnsafeBytes(orchardSpendingKey) { orchardPtr in
+            withOptionalUnsafeBytes(saplingAsk) { saplingPtr in
+                withOptionalUnsafeBytes(transparentSecretKey) { transparentPtr in
+                    zsig_pczt_sign(
+                        pcztPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        pcztData.count,
+                        nil, // sighash — computed internally, kept for ABI compat
+                        orchardPtr,
+                        saplingPtr,
+                        transparentPtr,
+                        &output,
+                        outputCapacity,
+                        &outputLen,
+                        nil  // rng — no longer needed, kept for ABI compat
+                    )
                 }
             }
         }
