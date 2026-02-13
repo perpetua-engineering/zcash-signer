@@ -43,6 +43,9 @@ echo "Building ZcashSigner for Apple platforms..."
 echo "Deployment targets: iOS=$IPHONEOS_DEPLOYMENT_TARGET, watchOS=$WATCHOS_DEPLOYMENT_TARGET, macOS=$MACOSX_DEPLOYMENT_TARGET"
 echo ""
 
+# Features to enable for all builds
+FEATURES="pczt-signer"
+
 # Build a tier-3 target (requires -Z build-std)
 build_tier3() {
     local target=$1
@@ -51,6 +54,7 @@ build_tier3() {
     cargo +nightly build \
         -Z build-std=core,alloc \
         --target "$target" \
+        --features "$FEATURES" \
         --release 2>&1 | grep -E "(Compiling|Finished|error|warning:)" || true
 }
 
@@ -63,6 +67,7 @@ build_tier2() {
     rustup target add "$target" 2>/dev/null || true
     cargo +nightly build \
         --target "$target" \
+        --features "$FEATURES" \
         --release 2>&1 | grep -E "(Compiling|Finished|error|warning:)" || true
 }
 
