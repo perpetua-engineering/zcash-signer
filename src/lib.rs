@@ -106,6 +106,12 @@ pub enum ZsigError {
     PointConversionFailed = 8,
     /// Buffer too small
     BufferTooSmall = 9,
+    /// PCZT parse failed
+    PcztParseFailed = 10,
+    /// PCZT signing failed (Orchard/Sapling/transparent)
+    PcztSignFailed = 11,
+    /// PCZT invalid key for signing
+    PcztInvalidKey = 12,
 }
 
 // -----------------------------------------------------------------------------
