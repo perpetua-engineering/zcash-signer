@@ -351,23 +351,27 @@ pub unsafe extern "C" fn zsig_derive_transparent_pubkey_hash(
     ZsigError::Success
 }
 
+/// Maximum derivation path depth (BIP-44 uses 5: m/44'/133'/account'/change/index)
+const MAX_DERIVATION_PATH_LEN: usize = 10;
+
 /// Sign a transparent input sighash using BIP-44 derived key
 ///
 /// # Arguments
 /// - `seed`: BIP-39 seed bytes
 /// - `seed_len`: length of seed (usually 64)
 /// - `derivation_path`: BIP-32 derivation path components
-/// - `path_len`: number of path components (usually 5)
+/// - `path_len`: number of path components (usually 5, max 10)
 /// - `sighash`: 32-byte sighash to sign
 /// - `sighash_type`: sighash type (usually 0x01 for SIGHASH_ALL)
-/// - `signature_out`: output buffer for DER signature (at least 72 bytes)
-/// - `signature_len_out`: output for actual signature length
-/// - `pubkey_out`: output buffer for compressed pubkey (33 bytes)
+/// - `signature_out`: output buffer for DER signature
+/// - `signature_out_len`: size of signature output buffer (must be >= 72)
+/// - `signature_len_out`: output for actual signature length written
+/// - `pubkey_out`: output buffer for compressed pubkey (must be >= 33 bytes)
 ///
 /// # Safety
 /// - All pointers must be valid
-/// - signature_out must have space for 72 bytes
-/// - pubkey_out must have space for 33 bytes
+/// - `signature_out` must have space for at least `signature_out_len` bytes
+/// - `pubkey_out` must have space for 33 bytes
 #[no_mangle]
 pub unsafe extern "C" fn zsig_sign_transparent(
     seed: *const u8,
@@ -377,6 +381,7 @@ pub unsafe extern "C" fn zsig_sign_transparent(
     sighash: *const u8,
     _sighash_type: u8,
     signature_out: *mut u8,
+    signature_out_len: usize,
     signature_len_out: *mut usize,
     pubkey_out: *mut u8,
 ) -> ZsigError {
@@ -387,6 +392,16 @@ pub unsafe extern "C" fn zsig_sign_transparent(
 
     if seed_len < 16 || seed_len > 64 {
         return ZsigError::InvalidSeed;
+    }
+
+    // Cap derivation path depth to prevent abuse
+    if path_len == 0 || path_len > MAX_DERIVATION_PATH_LEN {
+        return ZsigError::InvalidKey;
+    }
+
+    // Signature output buffer must hold at least a max-length DER signature (72 bytes)
+    if signature_out_len < 72 {
+        return ZsigError::BufferTooSmall;
     }
 
     let seed_slice = slice::from_raw_parts(seed, seed_len);
@@ -436,9 +451,14 @@ pub unsafe extern "C" fn zsig_sign_transparent(
     let der_sig = signature.to_der();
     let der_bytes = der_sig.as_bytes();
 
-    // Copy outputs
-    let sig_out_slice = slice::from_raw_parts_mut(signature_out, der_bytes.len().min(72));
-    sig_out_slice[..der_bytes.len().min(72)].copy_from_slice(&der_bytes[..der_bytes.len().min(72)]);
+    // Verify DER signature fits in caller's buffer
+    if der_bytes.len() > signature_out_len {
+        return ZsigError::BufferTooSmall;
+    }
+
+    // Copy outputs - write exactly der_bytes.len() bytes
+    let sig_out_slice = slice::from_raw_parts_mut(signature_out, der_bytes.len());
+    sig_out_slice.copy_from_slice(der_bytes);
     *signature_len_out = der_bytes.len();
 
     let pubkey_out_slice = slice::from_raw_parts_mut(pubkey_out, 33);

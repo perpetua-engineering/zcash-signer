@@ -569,6 +569,7 @@ public func signTransparent(
                     sighashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
                     sighashType,
                     &signatureBuffer,
+                    signatureBuffer.count,
                     &signatureLen,
                     &pubkeyBuffer
                 )

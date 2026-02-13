@@ -84,6 +84,9 @@ pub unsafe extern "C" fn zsig_sign_orchard_randomized(
     ZsigError::Success
 }
 
+/// Maximum message length for non-randomized signing (1 MB)
+const MAX_MESSAGE_LEN: usize = 1024 * 1024;
+
 /// Sign a message using RedPallas (non-randomized)
 ///
 /// This is for testing or cases where no randomization is needed.
@@ -103,6 +106,10 @@ pub unsafe extern "C" fn zsig_sign_orchard(
 ) -> ZsigError {
     if ask.is_null() || message.is_null() || signature_out.is_null() {
         return ZsigError::NullPointer;
+    }
+
+    if message_len > MAX_MESSAGE_LEN {
+        return ZsigError::BufferTooSmall;
     }
 
     let mut rng = CallbackRng::new(rng_callback);
@@ -143,6 +150,10 @@ pub unsafe extern "C" fn zsig_verify_orchard(
 ) -> ZsigError {
     if ak.is_null() || message.is_null() || signature.is_null() {
         return ZsigError::NullPointer;
+    }
+
+    if message_len > MAX_MESSAGE_LEN {
+        return ZsigError::BufferTooSmall;
     }
 
     let ak_bytes: [u8; 32] = slice::from_raw_parts(ak, 32).try_into().unwrap();
@@ -294,6 +305,10 @@ pub unsafe extern "C" fn zsig_sign_sapling(
         return ZsigError::NullPointer;
     }
 
+    if message_len > MAX_MESSAGE_LEN {
+        return ZsigError::BufferTooSmall;
+    }
+
     let mut rng = CallbackRng::new(rng_callback);
     let msg = slice::from_raw_parts(message, message_len);
     let ask_bytes = (*ask).bytes;
@@ -332,6 +347,10 @@ pub unsafe extern "C" fn zsig_verify_sapling(
 ) -> ZsigError {
     if ak.is_null() || message.is_null() || signature.is_null() {
         return ZsigError::NullPointer;
+    }
+
+    if message_len > MAX_MESSAGE_LEN {
+        return ZsigError::BufferTooSmall;
     }
 
     let ak_bytes: [u8; 32] = slice::from_raw_parts(ak, 32).try_into().unwrap();
