@@ -877,8 +877,9 @@ ZsigError zsig_pczt_info(const uint8_t* pczt_data,
  * Sign a PCZT binary with the provided keys
  *
  * Parses the PCZT, signs all applicable spend types using the provided
- * keys, and writes the signed PCZT to the output buffer. Key pointers
- * are optional — pass NULL to skip signing for that protocol.
+ * keys, and writes the signed PCZT to the output buffer. The sighash is
+ * computed internally from the PCZT data. Key pointers are optional —
+ * pass NULL to skip signing for that protocol.
  *
  * The signed PCZT is typically the same size as the input (signatures
  * replace placeholder bytes). If output_len is too small, returns
@@ -888,18 +889,18 @@ ZsigError zsig_pczt_info(const uint8_t* pczt_data,
  * Parameters:
  *   pczt_data: Pointer to raw PCZT binary data
  *   pczt_len: Length of PCZT data (max 1 MB)
- *   sighash: Pointer to 32-byte transaction sighash (must not be NULL)
+ *   sighash: Ignored (kept for ABI compatibility). May be NULL.
  *   orchard_sk: Pointer to 32-byte Orchard spending key (NULL to skip)
- *   sapling_esk: Pointer to 96-byte Sapling expanded spending key (NULL to skip)
+ *   sapling_ask: Pointer to 32-byte Sapling spend authorizing key (NULL to skip)
  *   transparent_sk: Pointer to 32-byte secp256k1 secret key (NULL to skip)
  *   output: Buffer for signed PCZT output
  *   output_len: Size of output buffer
  *   output_len_out: Receives actual length of signed PCZT
- *   rng: Callback function for random number generation
+ *   rng: Ignored (kept for ABI compatibility)
  *
  * Returns:
  *   ZSIG_SUCCESS on success
- *   ZSIG_ERROR_NULL_POINTER if pczt_data, sighash, output, or output_len_out is NULL
+ *   ZSIG_ERROR_NULL_POINTER if pczt_data, output, or output_len_out is NULL
  *   ZSIG_ERROR_BUFFER_TOO_SMALL if output_len is insufficient (check output_len_out)
  *   ZSIG_ERROR_PCZT_PARSE_FAILED if the PCZT binary is invalid
  *   ZSIG_ERROR_PCZT_INVALID_KEY if a provided key is malformed
@@ -909,7 +910,7 @@ ZsigError zsig_pczt_sign(const uint8_t* pczt_data,
                           size_t pczt_len,
                           const uint8_t* sighash,
                           const uint8_t* orchard_sk,
-                          const uint8_t* sapling_esk,
+                          const uint8_t* sapling_ask,
                           const uint8_t* transparent_sk,
                           uint8_t* output,
                           size_t output_len,
