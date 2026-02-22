@@ -142,6 +142,57 @@ fn derive_sapling_child(sk: &mut [u8; 32], chain_code: &mut [u8; 32], index: u32
 }
 
 // -----------------------------------------------------------------------------
+// pub(crate) Helper Functions (used by secure_sign)
+// -----------------------------------------------------------------------------
+
+/// Derive the 32-byte Orchard spending key from a BIP-39 seed.
+///
+/// Path: m/32'/coin_type'/account'
+pub(crate) fn derive_orchard_sk(seed: &[u8], coin_type: u32, account: u32) -> [u8; 32] {
+    let master = blake2b_personal(b"ZcashIP32Orchard", seed);
+
+    let mut sk = [0u8; 32];
+    let mut chain_code = [0u8; 32];
+    sk.copy_from_slice(&master[..32]);
+    chain_code.copy_from_slice(&master[32..64]);
+
+    derive_orchard_child(&mut sk, &mut chain_code, 32 | 0x80000000);
+    derive_orchard_child(&mut sk, &mut chain_code, coin_type | 0x80000000);
+    derive_orchard_child(&mut sk, &mut chain_code, account | 0x80000000);
+
+    sk
+}
+
+/// Derive the 32-byte Orchard ask from a spending key.
+///
+/// ask = PRF^expand(sk, 0x06) reduced to a normalized Pallas scalar.
+pub(crate) fn derive_orchard_ask_bytes(sk: &[u8; 32]) -> [u8; 32] {
+    let ask_expanded = prf_expand(sk, ORCHARD_ASK);
+    let ask = normalize_orchard_ask(to_pallas_scalar(&ask_expanded));
+    ask.to_repr()
+}
+
+/// Derive the 32-byte Sapling ask directly from a BIP-39 seed.
+///
+/// Path: m/32'/coin_type'/account', then ask = PRF^expand(sk, 0x00).
+pub(crate) fn derive_sapling_ask_bytes(seed: &[u8], coin_type: u32, account: u32) -> [u8; 32] {
+    let master = blake2b_personal(b"ZcashIP32Sapling", seed);
+
+    let mut sk = [0u8; 32];
+    let mut chain_code = [0u8; 32];
+    sk.copy_from_slice(&master[..32]);
+    chain_code.copy_from_slice(&master[32..64]);
+
+    derive_sapling_child(&mut sk, &mut chain_code, 32 | 0x80000000);
+    derive_sapling_child(&mut sk, &mut chain_code, coin_type | 0x80000000);
+    derive_sapling_child(&mut sk, &mut chain_code, account | 0x80000000);
+
+    let ask_expanded = prf_expand(&sk, SAPLING_ASK);
+    let ask = normalize_sapling_ask(to_jubjub_scalar(&ask_expanded));
+    ask.to_bytes()
+}
+
+// -----------------------------------------------------------------------------
 // FFI Functions
 // -----------------------------------------------------------------------------
 

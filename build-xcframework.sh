@@ -44,7 +44,7 @@ echo "Deployment targets: iOS=$IPHONEOS_DEPLOYMENT_TARGET, watchOS=$WATCHOS_DEPL
 echo ""
 
 # Features to enable for all builds
-FEATURES="pczt-signer"
+FEATURES="pczt-signer,secure-signer"
 
 # Build a tier-3 target (requires -Z build-std)
 build_tier3() {

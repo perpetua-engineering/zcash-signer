@@ -40,6 +40,7 @@ typedef enum {
     ZSIG_ERROR_PCZT_PARSE_FAILED = 10,
     ZSIG_ERROR_PCZT_SIGN_FAILED = 11,
     ZSIG_ERROR_PCZT_INVALID_KEY = 12,
+    ZSIG_ERROR_SEED_DERIVATION_FAILED = 13,
 } ZsigError;
 
 /* ============================================================================
@@ -916,6 +917,54 @@ ZsigError zsig_pczt_sign(const uint8_t* pczt_data,
                           size_t output_len,
                           size_t* output_len_out,
                           ZsigRngCallback rng);
+
+/* ============================================================================
+ * Secure PCZT Signing (SE-encrypted mnemonic, seed never in Swift)
+ * ============================================================================ */
+
+/*
+ * Sign a PCZT using an SE-encrypted mnemonic.
+ *
+ * The seed is decrypted inside C++/Rust via wallet-core's
+ * TWSecureSignerDeriveSeed, keys are derived in-process with zeroizing
+ * wrappers, and the signed PCZT is heap-allocated and returned via
+ * out_signed_pczt / out_len. The caller must free the buffer with
+ * zsig_free(ptr, len).
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference (passed through)
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   pczt_data:              Raw PCZT binary data
+ *   pczt_len:               Length of PCZT data (max 1 MB)
+ *   coin_type:              Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account:                Account index
+ *   out_signed_pczt:        Receives pointer to heap-allocated signed PCZT
+ *   out_len:                Receives length of signed PCZT
+ *
+ * Returns:
+ *   ZSIG_SUCCESS (0) on success, or a ZsigError code on failure
+ */
+int32_t zsig_pczt_sign_secure(const uint8_t* encrypted_mnemonic,
+                               size_t encrypted_mnemonic_len,
+                               const void* se_key_ref,
+                               const char* hkdf_salt,
+                               const uint8_t* pczt_data,
+                               size_t pczt_len,
+                               uint32_t coin_type,
+                               uint32_t account,
+                               uint8_t** out_signed_pczt,
+                               size_t* out_len);
+
+/*
+ * Free a heap-allocated buffer returned by zsig_pczt_sign_secure.
+ *
+ * Parameters:
+ *   ptr: Pointer returned via out_signed_pczt
+ *   len: Length returned via out_len
+ */
+void zsig_free(uint8_t* ptr, size_t len);
 
 /* ============================================================================
  * Utility Functions

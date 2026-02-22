@@ -23,7 +23,7 @@ const TESTNET_P2PKH_PREFIX: [u8; 2] = [0x1D, 0x25];
 // -----------------------------------------------------------------------------
 
 /// Derive BIP-32 master key from seed
-fn bip32_master_key(seed: &[u8]) -> ([u8; 32], [u8; 32]) {
+pub(crate) fn bip32_master_key(seed: &[u8]) -> ([u8; 32], [u8; 32]) {
     let mut mac = HmacSha512::new_from_slice(b"Bitcoin seed")
         .expect("HMAC can take key of any size");
     mac.update(seed);
@@ -54,7 +54,7 @@ fn derive_secp256k1_pubkey(sk: &[u8; 32]) -> Option<[u8; 33]> {
 
 /// BIP-32 hardened child derivation
 /// index should already have the hardened bit set (0x80000000)
-fn bip32_derive_hardened(
+pub(crate) fn bip32_derive_hardened(
     parent_sk: &[u8; 32],
     parent_chain_code: &[u8; 32],
     index: u32,
@@ -94,7 +94,7 @@ fn bip32_derive_hardened(
 }
 
 /// BIP-32 non-hardened child derivation
-fn bip32_derive_normal(
+pub(crate) fn bip32_derive_normal(
     parent_sk: &[u8; 32],
     parent_chain_code: &[u8; 32],
     index: u32,
@@ -183,6 +183,38 @@ fn encode_transparent_address(hash160: &[u8; 20], mainnet: bool) -> Vec<u8> {
 
     // Base58 encode
     bs58::encode(&data).into_vec()
+}
+
+// -----------------------------------------------------------------------------
+// pub(crate) Helper Functions (used by secure_sign)
+// -----------------------------------------------------------------------------
+
+/// Derive the 32-byte transparent secret key from a BIP-39 seed.
+///
+/// Path: m/44'/coin_type'/account'/0/0
+pub(crate) fn derive_transparent_sk(seed: &[u8], coin_type: u32, account: u32) -> Option<[u8; 32]> {
+    let (mut sk, mut cc) = bip32_master_key(seed);
+
+    // m/44'
+    let (new_sk, new_cc) = bip32_derive_hardened(&sk, &cc, 44 | 0x80000000)?;
+    sk = new_sk; cc = new_cc;
+
+    // m/44'/coin_type'
+    let (new_sk, new_cc) = bip32_derive_hardened(&sk, &cc, coin_type | 0x80000000)?;
+    sk = new_sk; cc = new_cc;
+
+    // m/44'/coin_type'/account'
+    let (new_sk, new_cc) = bip32_derive_hardened(&sk, &cc, account | 0x80000000)?;
+    sk = new_sk; cc = new_cc;
+
+    // m/44'/coin_type'/account'/0 (external chain)
+    let (new_sk, new_cc) = bip32_derive_normal(&sk, &cc, 0)?;
+    sk = new_sk; cc = new_cc;
+
+    // m/44'/coin_type'/account'/0/0 (first address)
+    let (new_sk, _) = bip32_derive_normal(&sk, &cc, 0)?;
+
+    Some(new_sk)
 }
 
 // -----------------------------------------------------------------------------

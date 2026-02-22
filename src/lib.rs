@@ -21,6 +21,8 @@ mod diversifier;
 mod keys;
 #[cfg(feature = "pczt-signer")]
 pub mod pczt_signer;
+#[cfg(feature = "secure-signer")]
+mod secure_sign;
 mod signing;
 mod transparent;
 
@@ -112,6 +114,8 @@ pub enum ZsigError {
     PcztSignFailed = 11,
     /// PCZT invalid key for signing
     PcztInvalidKey = 12,
+    /// Seed derivation failed (secure signer)
+    SeedDerivationFailed = 13,
 }
 
 // -----------------------------------------------------------------------------
@@ -233,3 +237,20 @@ pub extern "C" fn zsig_version() -> *const u8 {
 
 // The actual FFI functions are implemented in keys.rs, signing.rs, and transparent.rs
 // and are exported via #[no_mangle] pub extern "C"
+
+// -----------------------------------------------------------------------------
+// Memory Management
+// -----------------------------------------------------------------------------
+
+/// Free a heap-allocated buffer returned by `zsig_pczt_sign_secure`.
+///
+/// # Safety
+/// - `ptr` must have been returned by `zsig_pczt_sign_secure`
+/// - `len` must be the length that was written to `out_len`
+/// - Must only be called once per allocation
+#[no_mangle]
+pub unsafe extern "C" fn zsig_free(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() && len > 0 {
+        let _ = alloc::boxed::Box::from_raw(core::slice::from_raw_parts_mut(ptr, len));
+    }
+}
