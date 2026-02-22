@@ -23,6 +23,7 @@ xcuserdata/
 __.SYMDEF
 pczt-cli/libzcash_signer.a
 macos-universal/
+vendor/ZcashSigner.xcframework/
 
 # Build artifacts
 build/
