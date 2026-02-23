@@ -10,6 +10,8 @@ Minimal Zcash signing primitives for watchOS. This crate provides the cryptograp
 - **RedJubjub randomized signing** - Sign Sapling spends with alpha randomizers for PCZT
 - **Combined UFVK generation** - Produce Unified Full Viewing Keys with Transparent + Sapling + Orchard
 - **BIP-44 transparent addresses** - Derive t-addresses for CEX compatibility
+- **PCZT signing** — Sign full PCZTs (Orchard, Sapling, transparent) in one call
+- **Secure PCZT signing** — SE-encrypted mnemonic never leaves Rust; keys zeroized on drop
 - **`no_std` compatible** - Runs on watchOS tier-3 targets (arm64, arm64_32)
 
 ## Building
@@ -26,6 +28,9 @@ rustup install nightly
 # Build for all Apple platforms
 ./build-xcframework.sh
 ```
+
+The build script enables `pczt-signer` and `secure-signer` by default.
+For a minimal build without PCZT support, edit `FEATURES` in `build-xcframework.sh`.
 
 This creates:
 - `target/watchos-device-universal/libzcash_signer.a` (arm64 + arm64_32)
@@ -194,6 +199,15 @@ For direct C/Objective-C usage:
 | `zsig_encode_unified_full_viewing_key` | Encode Orchard-only FVK as UFVK |
 | `zsig_encode_combined_ufvk` | Encode combined FVK as UFVK |
 
+### PCZT (full-transaction signing)
+
+| Function | Description |
+|----------|-------------|
+| `zsig_pczt_info` | Parse PCZT and return summary (action/spend/input counts) |
+| `zsig_pczt_sign` | Sign PCZT with provided key bytes (Orchard, Sapling, transparent) |
+| `zsig_pczt_sign_secure` | Sign PCZT using SE-encrypted mnemonic (keys never leave Rust) |
+| `zsig_free` | Free heap-allocated buffer from `zsig_pczt_sign_secure` |
+
 ## Architecture Notes
 
 ### Why This Exists
@@ -233,6 +247,24 @@ Phone (SDK)                          Watch (this crate)
 7. Broadcast transaction
 ```
 
+#### Secure signing path (`zsig_pczt_sign_secure`)
+
+```
+Phone (SDK)                          Watch
+─────────────────────────────────────────────────────────
+1. Build PCZT
+                    ──────────────►
+                                     2. Receive SE-encrypted mnemonic blob
+                                     3. Decrypt seed in C++ (wallet-core)
+                                     4. Pass seed to Rust via FFI
+                                     5. Derive Zeroizing<SpendingKey> for each pool
+                                     6. Sign all spends (Orchard, Sapling, transparent)
+                                     7. Keys zeroized on drop
+                    ◄──────────────
+8. Apply signed PCZT
+9. Prove & broadcast
+```
+
 ### Vendor Patches
 
 The `vendor/` directory contains patched versions of:
@@ -253,6 +285,17 @@ swift test
 - Keys are never logged or persisted by this library
 - RNG is provided via callback (use `SecRandomCopyBytes` on Apple platforms)
 - All operations use constant-time implementations where available
+- `secure-signer` feature wraps seed and keys in `Zeroizing<T>` (zeroed on drop)
+- `zsig_pczt_sign_secure` accepts SE-encrypted mnemonic — seed decrypted in C++, used in Rust, never exposed to Swift
+
+## Cargo Features
+
+| Feature | Description |
+|---------|-------------|
+| `pczt-signer` | PCZT parsing and signing |
+| `secure-signer` | Zeroizing key management (includes `pczt-signer`) |
+| `debug-tools` | BIP-39 mnemonic parsing, reference key comparison |
+| `std` | Standard library (not available on watchOS) |
 
 ## PCZT Workflow with pczt-cli
 
