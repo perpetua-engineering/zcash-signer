@@ -967,6 +967,143 @@ int32_t zsig_pczt_sign_secure(const uint8_t* encrypted_mnemonic,
 void zsig_free(uint8_t* ptr, size_t len);
 
 /* ============================================================================
+ * Secure Address/Key Derivation (SE-encrypted mnemonic, seed never in Swift)
+ * ============================================================================ */
+
+/*
+ * Derive Orchard unified address from SE-encrypted mnemonic.
+ *
+ * The seed is decrypted inside C++/Rust, the address is derived, and
+ * all sensitive material is zeroized before returning. Only the public
+ * address string is returned to the caller.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   coin_type:              Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account:                Account index
+ *   mainnet:                true for mainnet (u...), false for testnet
+ *   output:                 Buffer for null-terminated UA string (at least 256 bytes)
+ *   output_len:             Size of output buffer
+ *
+ * Returns:
+ *   Length of address string (positive), or negative error code on failure
+ */
+int32_t zsig_derive_orchard_address_secure(const uint8_t* encrypted_mnemonic,
+                                            size_t encrypted_mnemonic_len,
+                                            const void* se_key_ref,
+                                            const char* hkdf_salt,
+                                            uint32_t coin_type,
+                                            uint32_t account,
+                                            bool mainnet,
+                                            uint8_t* output,
+                                            size_t output_len);
+
+/*
+ * Derive transparent P2PKH address from SE-encrypted mnemonic.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   account:                Account index
+ *   index:                  Address index
+ *   mainnet:                true for mainnet (t1...), false for testnet
+ *   output:                 Buffer for null-terminated address string (at least 64 bytes)
+ *   output_len:             Size of output buffer
+ *
+ * Returns:
+ *   Length of address string (positive), or negative error code on failure
+ */
+int32_t zsig_derive_transparent_address_secure(const uint8_t* encrypted_mnemonic,
+                                                size_t encrypted_mnemonic_len,
+                                                const void* se_key_ref,
+                                                const char* hkdf_salt,
+                                                uint32_t account,
+                                                uint32_t index,
+                                                bool mainnet,
+                                                uint8_t* output,
+                                                size_t output_len);
+
+/*
+ * Derive transparent pubkey hash (20 bytes) from SE-encrypted mnemonic.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   account:                Account index
+ *   index:                  Address index
+ *   hash_out:               Buffer for 20-byte pubkey hash output
+ *
+ * Returns:
+ *   ZSIG_SUCCESS (0) on success, or a ZsigError code on failure
+ */
+int32_t zsig_derive_transparent_pubkey_hash_secure(const uint8_t* encrypted_mnemonic,
+                                                    size_t encrypted_mnemonic_len,
+                                                    const void* se_key_ref,
+                                                    const char* hkdf_salt,
+                                                    uint32_t account,
+                                                    uint32_t index,
+                                                    uint8_t* hash_out);
+
+/*
+ * Derive Combined UFVK string from SE-encrypted mnemonic.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   coin_type:              Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account:                Account index
+ *   mainnet:                true for mainnet, false for testnet
+ *   output:                 Buffer for null-terminated UFVK string (at least 512 bytes)
+ *   output_len:             Size of output buffer
+ *
+ * Returns:
+ *   Length of UFVK string (positive), or negative error code on failure
+ */
+int32_t zsig_derive_combined_ufvk_string_secure(const uint8_t* encrypted_mnemonic,
+                                                  size_t encrypted_mnemonic_len,
+                                                  const void* se_key_ref,
+                                                  const char* hkdf_salt,
+                                                  uint32_t coin_type,
+                                                  uint32_t account,
+                                                  bool mainnet,
+                                                  uint8_t* output,
+                                                  size_t output_len);
+
+/*
+ * Derive first valid diversifier index from SE-encrypted mnemonic.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   coin_type:              Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account:                Account index
+ *   index_out:              Pointer to receive first valid diversifier index
+ *   diversifier_out:        Optional pointer to receive 11-byte diversifier (can be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS (0) on success, or a ZsigError code on failure
+ */
+int32_t zsig_derive_first_valid_diversifier_index_secure(const uint8_t* encrypted_mnemonic,
+                                                          size_t encrypted_mnemonic_len,
+                                                          const void* se_key_ref,
+                                                          const char* hkdf_salt,
+                                                          uint32_t coin_type,
+                                                          uint32_t account,
+                                                          uint64_t* index_out,
+                                                          uint8_t* diversifier_out);
+
+/* ============================================================================
  * Utility Functions
  * ============================================================================ */
 

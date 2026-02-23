@@ -15,27 +15,9 @@ use zeroize::Zeroizing;
 
 use crate::keys::{derive_orchard_ask_bytes, derive_orchard_sk, derive_sapling_ask_bytes};
 use crate::pczt_signer::{sign_pczt, PcztSigningKeys};
+use crate::secure_derive::derive_seed_secure;
 use crate::transparent::derive_transparent_sk;
 use crate::ZsigError;
-
-// -----------------------------------------------------------------------------
-// Wallet-core C FFI (provided at link time by Trust Wallet Core)
-// -----------------------------------------------------------------------------
-
-extern "C" {
-    fn TWDataCreateWithBytes(bytes: *const u8, size: usize) -> *mut c_void;
-    fn TWDataBytes(data: *const c_void) -> *const u8;
-    fn TWDataSize(data: *const c_void) -> usize;
-    fn TWDataDelete(data: *mut c_void);
-    fn TWStringCreateWithUTF8Bytes(str: *const c_char) -> *mut c_void;
-    fn TWStringDelete(str: *mut c_void);
-    fn TWSecureSignerDeriveSeed(
-        encrypted_mnemonic: *const c_void,
-        se_key_ref: *const c_void,
-        hkdf_salt: *const c_void,
-    ) -> *mut c_void;
-    fn TWSecureSignerFreeSeed(seed: *mut c_void);
-}
 
 /// Maximum PCZT payload size (1 MB).
 const MAX_PCZT_LEN: usize = 1024 * 1024;
@@ -55,52 +37,17 @@ fn pczt_sign_secure(
     coin_type: u32,
     account: u32,
 ) -> Result<alloc::vec::Vec<u8>, ZsigError> {
-    // ── 1. Call wallet-core to decrypt the mnemonic → seed ──────────────
-    let tw_mnemonic = unsafe { TWDataCreateWithBytes(encrypted_mnemonic.as_ptr(), encrypted_mnemonic.len()) };
-    if tw_mnemonic.is_null() {
-        return Err(ZsigError::SeedDerivationFailed);
-    }
+    // ── 1. Decrypt mnemonic → seed via shared helper ────────────────────
+    let seed = derive_seed_secure(encrypted_mnemonic, se_key_ref, hkdf_salt)?;
 
-    let tw_salt = unsafe { TWStringCreateWithUTF8Bytes(hkdf_salt) };
-    if tw_salt.is_null() {
-        unsafe { TWDataDelete(tw_mnemonic) };
-        return Err(ZsigError::SeedDerivationFailed);
-    }
-
-    let tw_seed = unsafe { TWSecureSignerDeriveSeed(tw_mnemonic, se_key_ref, tw_salt) };
-
-    // Clean up input wrappers immediately.
-    unsafe {
-        TWDataDelete(tw_mnemonic);
-        TWStringDelete(tw_salt);
-    }
-
-    if tw_seed.is_null() {
-        return Err(ZsigError::SeedDerivationFailed);
-    }
-
-    // ── 2. Copy seed into Zeroizing buffer, free wallet-core's copy ────
-    let seed_len = unsafe { TWDataSize(tw_seed) };
-    if seed_len != 64 {
-        unsafe { TWSecureSignerFreeSeed(tw_seed) };
-        return Err(ZsigError::SeedDerivationFailed);
-    }
-
-    let mut seed = Zeroizing::new([0u8; 64]);
-    unsafe {
-        let seed_ptr = TWDataBytes(tw_seed);
-        core::ptr::copy_nonoverlapping(seed_ptr, seed.as_mut_ptr(), 64);
-        TWSecureSignerFreeSeed(tw_seed);
-    }
-
-    // ── 3. Parse the PCZT to see which key types are needed ────────────
+    // ── 2. Parse the PCZT to see which key types are needed ────────────
     let pczt = pczt::Pczt::parse(pczt_data).map_err(|_| ZsigError::PcztParseFailed)?;
     let has_orchard = !pczt.orchard().actions().is_empty();
     let has_sapling = !pczt.sapling().spends().is_empty();
     let has_transparent = !pczt.transparent().inputs().is_empty();
     drop(pczt); // Free the parsed PCZT before signing (sign_pczt re-parses)
 
-    // ── 4. Derive only the keys we need ────────────────────────────────
+    // ── 3. Derive only the keys we need ────────────────────────────────
     let orchard_sk = if has_orchard {
         let sk = Zeroizing::new(derive_orchard_sk(&*seed, coin_type, account));
         Some(sk)
@@ -132,7 +79,7 @@ fn pczt_sign_secure(
     // Seed is no longer needed — drop it now (zeroizes).
     drop(seed);
 
-    // ── 5. Sign the PCZT ───────────────────────────────────────────────
+    // ── 4. Sign the PCZT ───────────────────────────────────────────────
     let keys = PcztSigningKeys {
         orchard_sk: orchard_sk.as_deref(),
         sapling_ask: sapling_ask.as_deref(),

@@ -1179,6 +1179,231 @@ public func pcztSignSecure(
     return signedPczt
 }
 
+// MARK: - Secure Address/Key Derivation (SE-encrypted mnemonic, seed never in Swift)
+
+/// Derive Orchard unified address from SE-encrypted mnemonic.
+///
+/// The seed is decrypted inside C++/Rust, the address is derived, and all sensitive
+/// material is zeroized before returning. Only the public address string is returned.
+///
+/// - Parameters:
+///   - encryptedMnemonic: SE-encrypted mnemonic blob
+///   - seKeyRef: Secure Enclave P-256 private key reference
+///   - hkdfSalt: HKDF salt string matching the one used during encryption
+///   - coinType: Coin type (133 for Zcash mainnet)
+///   - account: Account index (typically 0)
+/// - Returns: The unified address string (e.g., "u1...")
+public func deriveOrchardAddressSecure(
+    encryptedMnemonic: Data,
+    seKeyRef: SecKey,
+    hkdfSalt: String,
+    coinType: UInt32,
+    account: UInt32
+) throws -> String {
+    var output = [UInt8](repeating: 0, count: 256)
+
+    let len = encryptedMnemonic.withUnsafeBytes { mnemonicPtr in
+        hkdfSalt.withCString { saltPtr in
+            let seKeyRawPtr = Unmanaged.passUnretained(seKeyRef).toOpaque()
+            return zsig_derive_orchard_address_secure(
+                mnemonicPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                encryptedMnemonic.count,
+                seKeyRawPtr,
+                saltPtr,
+                coinType,
+                account,
+                true, // mainnet
+                &output,
+                256
+            )
+        }
+    }
+
+    guard len > 0 else {
+        throw ZcashSignerError(code: UInt32(bitPattern: -len))
+    }
+
+    guard let address = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+        throw ZcashSignerError.invalidKey
+    }
+
+    return address
+}
+
+/// Derive transparent P2PKH address from SE-encrypted mnemonic.
+///
+/// - Parameters:
+///   - encryptedMnemonic: SE-encrypted mnemonic blob
+///   - seKeyRef: Secure Enclave P-256 private key reference
+///   - hkdfSalt: HKDF salt string matching the one used during encryption
+///   - account: Account index
+///   - index: Address index
+/// - Returns: The transparent address string (e.g., "t1...")
+public func deriveTransparentAddressSecure(
+    encryptedMnemonic: Data,
+    seKeyRef: SecKey,
+    hkdfSalt: String,
+    account: UInt32,
+    index: UInt32
+) throws -> String {
+    var output = [UInt8](repeating: 0, count: 64)
+
+    let len = encryptedMnemonic.withUnsafeBytes { mnemonicPtr in
+        hkdfSalt.withCString { saltPtr in
+            let seKeyRawPtr = Unmanaged.passUnretained(seKeyRef).toOpaque()
+            return zsig_derive_transparent_address_secure(
+                mnemonicPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                encryptedMnemonic.count,
+                seKeyRawPtr,
+                saltPtr,
+                account,
+                index,
+                true, // mainnet
+                &output,
+                64
+            )
+        }
+    }
+
+    guard len > 0 else {
+        throw ZcashSignerError(code: UInt32(bitPattern: -len))
+    }
+
+    guard let address = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+        throw ZcashSignerError.invalidKey
+    }
+
+    return address
+}
+
+/// Derive transparent pubkey hash (20 bytes) from SE-encrypted mnemonic.
+///
+/// - Parameters:
+///   - encryptedMnemonic: SE-encrypted mnemonic blob
+///   - seKeyRef: Secure Enclave P-256 private key reference
+///   - hkdfSalt: HKDF salt string matching the one used during encryption
+///   - account: Account index
+///   - index: Address index
+/// - Returns: The 20-byte pubkey hash
+public func deriveTransparentPubkeyHashSecure(
+    encryptedMnemonic: Data,
+    seKeyRef: SecKey,
+    hkdfSalt: String,
+    account: UInt32,
+    index: UInt32
+) throws -> Data {
+    var hash = [UInt8](repeating: 0, count: 20)
+
+    let result = encryptedMnemonic.withUnsafeBytes { mnemonicPtr in
+        hkdfSalt.withCString { saltPtr in
+            let seKeyRawPtr = Unmanaged.passUnretained(seKeyRef).toOpaque()
+            return zsig_derive_transparent_pubkey_hash_secure(
+                mnemonicPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                encryptedMnemonic.count,
+                seKeyRawPtr,
+                saltPtr,
+                account,
+                index,
+                &hash
+            )
+        }
+    }
+
+    guard result == 0 else {
+        throw ZcashSignerError(code: UInt32(bitPattern: result))
+    }
+
+    return Data(hash)
+}
+
+/// Derive Combined UFVK string from SE-encrypted mnemonic.
+///
+/// - Parameters:
+///   - encryptedMnemonic: SE-encrypted mnemonic blob
+///   - seKeyRef: Secure Enclave P-256 private key reference
+///   - hkdfSalt: HKDF salt string matching the one used during encryption
+///   - coinType: Coin type (133 for Zcash mainnet)
+///   - account: Account index
+/// - Returns: The UFVK string (e.g., "uview1...")
+public func deriveCombinedUFVKStringSecure(
+    encryptedMnemonic: Data,
+    seKeyRef: SecKey,
+    hkdfSalt: String,
+    coinType: UInt32,
+    account: UInt32
+) throws -> String {
+    var output = [UInt8](repeating: 0, count: 512)
+
+    let len = encryptedMnemonic.withUnsafeBytes { mnemonicPtr in
+        hkdfSalt.withCString { saltPtr in
+            let seKeyRawPtr = Unmanaged.passUnretained(seKeyRef).toOpaque()
+            return zsig_derive_combined_ufvk_string_secure(
+                mnemonicPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                encryptedMnemonic.count,
+                seKeyRawPtr,
+                saltPtr,
+                coinType,
+                account,
+                true, // mainnet
+                &output,
+                512
+            )
+        }
+    }
+
+    guard len > 0 else {
+        throw ZcashSignerError(code: UInt32(bitPattern: -len))
+    }
+
+    guard let ufvk = String(bytes: output.prefix(Int(len)), encoding: .utf8) else {
+        throw ZcashSignerError.invalidKey
+    }
+
+    return ufvk
+}
+
+/// Derive first valid diversifier index from SE-encrypted mnemonic.
+///
+/// - Parameters:
+///   - encryptedMnemonic: SE-encrypted mnemonic blob
+///   - seKeyRef: Secure Enclave P-256 private key reference
+///   - hkdfSalt: HKDF salt string matching the one used during encryption
+///   - coinType: Coin type (133 for Zcash mainnet)
+///   - account: Account index
+/// - Returns: Tuple of (first valid diversifier index, 11-byte diversifier)
+public func deriveFirstValidDiversifierIndexSecure(
+    encryptedMnemonic: Data,
+    seKeyRef: SecKey,
+    hkdfSalt: String,
+    coinType: UInt32,
+    account: UInt32
+) throws -> (index: UInt64, diversifier: Data) {
+    var index: UInt64 = 0
+    var diversifier = [UInt8](repeating: 0, count: 11)
+
+    let result = encryptedMnemonic.withUnsafeBytes { mnemonicPtr in
+        hkdfSalt.withCString { saltPtr in
+            let seKeyRawPtr = Unmanaged.passUnretained(seKeyRef).toOpaque()
+            return zsig_derive_first_valid_diversifier_index_secure(
+                mnemonicPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                encryptedMnemonic.count,
+                seKeyRawPtr,
+                saltPtr,
+                coinType,
+                account,
+                &index,
+                &diversifier
+            )
+        }
+    }
+
+    guard result == 0 else {
+        throw ZcashSignerError(code: UInt32(bitPattern: result))
+    }
+
+    return (index: index, diversifier: Data(diversifier))
+}
+
 // MARK: - RNG Callback
 
 /// Callback for SecRandomCopyBytes, passed to Rust library
