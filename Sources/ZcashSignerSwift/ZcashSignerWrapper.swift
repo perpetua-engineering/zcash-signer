@@ -1117,6 +1117,68 @@ private func withOptionalUnsafeBytes<R>(
     }
 }
 
+// MARK: - Secure PCZT Signing
+
+/// Sign a PCZT using an SE-encrypted mnemonic, keeping the seed entirely in C/Rust.
+///
+/// The SE-encrypted mnemonic blob and Secure Enclave key reference are passed to the
+/// native library, which decrypts the mnemonic, derives the BIP-39 seed, derives all
+/// required Zcash keys (Orchard, Sapling, transparent), signs the PCZT, and zeroizes
+/// sensitive material before returning. The mnemonic and seed never appear in Swift memory.
+///
+/// The caller must pass the raw encrypted mnemonic blob (from keychain) and a SecKey
+/// reference to the SE private key used for ECDH decryption.
+///
+/// - Parameters:
+///   - encryptedMnemonic: SE-encrypted mnemonic blob (version byte + ephemeral pubkey + nonce + ciphertext + tag)
+///   - seKeyRef: Secure Enclave P-256 private key reference (SecKey) for ECDH decryption
+///   - hkdfSalt: HKDF salt string matching the one used during encryption
+///   - pcztData: Raw PCZT binary data to sign
+///   - coinType: Coin type for key derivation (133 for Zcash mainnet)
+///   - account: Account index for key derivation (typically 0)
+/// - Returns: Signed PCZT binary data
+public func pcztSignSecure(
+    encryptedMnemonic: Data,
+    seKeyRef: SecKey,
+    hkdfSalt: String,
+    pcztData: Data,
+    coinType: UInt32,
+    account: UInt32
+) throws -> Data {
+    var outPtr: UnsafeMutablePointer<UInt8>?
+    var outLen: Int = 0
+
+    let result = encryptedMnemonic.withUnsafeBytes { mnemonicPtr in
+        pcztData.withUnsafeBytes { pcztPtr in
+            hkdfSalt.withCString { saltPtr in
+                let seKeyRawPtr = Unmanaged.passUnretained(seKeyRef).toOpaque()
+                return zsig_pczt_sign_secure(
+                    mnemonicPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    encryptedMnemonic.count,
+                    seKeyRawPtr,
+                    saltPtr,
+                    pcztPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                    pcztData.count,
+                    coinType,
+                    account,
+                    &outPtr,
+                    &outLen
+                )
+            }
+        }
+    }
+
+    guard result == 0, let signedPtr = outPtr, outLen > 0 else {
+        throw ZcashSignerError(code: UInt32(bitPattern: result))
+    }
+
+    // Copy heap-allocated result into Swift Data, then free the C buffer
+    let signedPczt = Data(bytes: signedPtr, count: outLen)
+    zsig_free(signedPtr, outLen)
+
+    return signedPczt
+}
+
 // MARK: - RNG Callback
 
 /// Callback for SecRandomCopyBytes, passed to Rust library
