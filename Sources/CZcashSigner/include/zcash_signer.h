@@ -37,6 +37,10 @@ typedef enum {
     ZSIG_ERROR_SCALAR_CONVERSION_FAILED = 7,
     ZSIG_ERROR_POINT_CONVERSION_FAILED = 8,
     ZSIG_ERROR_BUFFER_TOO_SMALL = 9,
+    ZSIG_ERROR_PCZT_PARSE_FAILED = 10,
+    ZSIG_ERROR_PCZT_SIGN_FAILED = 11,
+    ZSIG_ERROR_PCZT_INVALID_KEY = 12,
+    ZSIG_ERROR_SEED_DERIVATION_FAILED = 13,
 } ZsigError;
 
 /* ============================================================================
@@ -519,15 +523,18 @@ ZsigError zsig_derive_transparent_pubkey_hash(const uint8_t* seed,
  *   seed: BIP-39 seed bytes
  *   seed_len: Length of seed (usually 64)
  *   derivation_path: BIP-32 derivation path components with hardened bits
- *   path_len: Number of path components (usually 5)
+ *   path_len: Number of path components (usually 5, max 10)
  *   sighash: 32-byte sighash to sign
  *   sighash_type: Sighash type (usually 0x01 for SIGHASH_ALL)
- *   signature_out: Output buffer for DER signature (at least 72 bytes)
- *   signature_len_out: Output for actual signature length
+ *   signature_out: Output buffer for DER signature
+ *   signature_out_len: Size of signature output buffer (must be >= 72)
+ *   signature_len_out: Output for actual signature length written
  *   pubkey_out: Output buffer for compressed pubkey (33 bytes)
  *
  * Returns:
  *   ZSIG_SUCCESS on success, error code on failure
+ *   ZSIG_ERROR_BUFFER_TOO_SMALL if signature_out_len < 72
+ *   ZSIG_ERROR_INVALID_KEY if path_len is 0 or > 10
  */
 ZsigError zsig_sign_transparent(const uint8_t* seed,
                                  size_t seed_len,
@@ -536,6 +543,7 @@ ZsigError zsig_sign_transparent(const uint8_t* seed,
                                  const uint8_t* sighash,
                                  uint8_t sighash_type,
                                  uint8_t* signature_out,
+                                 size_t signature_out_len,
                                  size_t* signature_len_out,
                                  uint8_t* pubkey_out);
 
@@ -829,6 +837,271 @@ int32_t zsig_derive_combined_ufvk_string(const uint8_t* seed,
                                           bool mainnet,
                                           uint8_t* output,
                                           size_t output_len);
+
+/* ============================================================================
+ * PCZT Signing (Partially Created Zcash Transaction)
+ * ============================================================================ */
+
+/*
+ * PCZT summary information returned by zsig_pczt_info
+ */
+typedef struct {
+    uint32_t orchard_actions;
+    uint32_t sapling_spends;
+    uint32_t transparent_inputs;
+    uint32_t transparent_outputs;
+} ZsigPcztInfo;
+
+/*
+ * Extract summary information from a PCZT binary
+ *
+ * Parses the PCZT and returns counts of Orchard actions, Sapling spends,
+ * transparent inputs, and transparent outputs. Useful for display on the
+ * watch before the user confirms signing.
+ *
+ * Parameters:
+ *   pczt_data: Pointer to raw PCZT binary data
+ *   pczt_len: Length of PCZT data (max 1 MB)
+ *   info_out: Pointer to receive the PCZT info (must not be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success
+ *   ZSIG_ERROR_NULL_POINTER if any required pointer is NULL
+ *   ZSIG_ERROR_BUFFER_TOO_SMALL if pczt_len is 0 or > 1MB
+ *   ZSIG_ERROR_PCZT_PARSE_FAILED if the PCZT binary is invalid
+ */
+ZsigError zsig_pczt_info(const uint8_t* pczt_data,
+                          size_t pczt_len,
+                          ZsigPcztInfo* info_out);
+
+/*
+ * Sign a PCZT binary with the provided keys
+ *
+ * Parses the PCZT, signs all applicable spend types using the provided
+ * keys, and writes the signed PCZT to the output buffer. The sighash is
+ * computed internally from the PCZT data. Key pointers are optional —
+ * pass NULL to skip signing for that protocol.
+ *
+ * The signed PCZT is typically the same size as the input (signatures
+ * replace placeholder bytes). If output_len is too small, returns
+ * ZSIG_ERROR_BUFFER_TOO_SMALL and writes the required size to
+ * output_len_out.
+ *
+ * Parameters:
+ *   pczt_data: Pointer to raw PCZT binary data
+ *   pczt_len: Length of PCZT data (max 1 MB)
+ *   sighash: Ignored (kept for ABI compatibility). May be NULL.
+ *   orchard_sk: Pointer to 32-byte Orchard spending key (NULL to skip)
+ *   sapling_ask: Pointer to 32-byte Sapling spend authorizing key (NULL to skip)
+ *   transparent_sk: Pointer to 32-byte secp256k1 secret key (NULL to skip)
+ *   output: Buffer for signed PCZT output
+ *   output_len: Size of output buffer
+ *   output_len_out: Receives actual length of signed PCZT
+ *   rng: Ignored (kept for ABI compatibility)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success
+ *   ZSIG_ERROR_NULL_POINTER if pczt_data, output, or output_len_out is NULL
+ *   ZSIG_ERROR_BUFFER_TOO_SMALL if output_len is insufficient (check output_len_out)
+ *   ZSIG_ERROR_PCZT_PARSE_FAILED if the PCZT binary is invalid
+ *   ZSIG_ERROR_PCZT_INVALID_KEY if a provided key is malformed
+ *   ZSIG_ERROR_PCZT_SIGN_FAILED if signing fails
+ */
+ZsigError zsig_pczt_sign(const uint8_t* pczt_data,
+                          size_t pczt_len,
+                          const uint8_t* sighash,
+                          const uint8_t* orchard_sk,
+                          const uint8_t* sapling_ask,
+                          const uint8_t* transparent_sk,
+                          uint8_t* output,
+                          size_t output_len,
+                          size_t* output_len_out,
+                          ZsigRngCallback rng);
+
+/* ============================================================================
+ * Secure PCZT Signing (SE-encrypted mnemonic, seed never in Swift)
+ * ============================================================================ */
+
+/*
+ * Sign a PCZT using an SE-encrypted mnemonic.
+ *
+ * The seed is decrypted inside C++/Rust via wallet-core's
+ * TWSecureSignerDeriveSeed, keys are derived in-process with zeroizing
+ * wrappers, and the signed PCZT is heap-allocated and returned via
+ * out_signed_pczt / out_len. The caller must free the buffer with
+ * zsig_free(ptr, len).
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference (passed through)
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   pczt_data:              Raw PCZT binary data
+ *   pczt_len:               Length of PCZT data (max 1 MB)
+ *   coin_type:              Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account:                Account index
+ *   out_signed_pczt:        Receives pointer to heap-allocated signed PCZT
+ *   out_len:                Receives length of signed PCZT
+ *
+ * Returns:
+ *   ZSIG_SUCCESS (0) on success, or a ZsigError code on failure
+ */
+int32_t zsig_pczt_sign_secure(const uint8_t* encrypted_mnemonic,
+                               size_t encrypted_mnemonic_len,
+                               const void* se_key_ref,
+                               const char* hkdf_salt,
+                               const uint8_t* pczt_data,
+                               size_t pczt_len,
+                               uint32_t coin_type,
+                               uint32_t account,
+                               uint8_t** out_signed_pczt,
+                               size_t* out_len);
+
+/*
+ * Free a heap-allocated buffer returned by zsig_pczt_sign_secure.
+ *
+ * Parameters:
+ *   ptr: Pointer returned via out_signed_pczt
+ *   len: Length returned via out_len
+ */
+void zsig_free(uint8_t* ptr, size_t len);
+
+/* ============================================================================
+ * Secure Address/Key Derivation (SE-encrypted mnemonic, seed never in Swift)
+ * ============================================================================ */
+
+/*
+ * Derive Orchard unified address from SE-encrypted mnemonic.
+ *
+ * The seed is decrypted inside C++/Rust, the address is derived, and
+ * all sensitive material is zeroized before returning. Only the public
+ * address string is returned to the caller.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   coin_type:              Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account:                Account index
+ *   mainnet:                true for mainnet (u...), false for testnet
+ *   output:                 Buffer for null-terminated UA string (at least 256 bytes)
+ *   output_len:             Size of output buffer
+ *
+ * Returns:
+ *   Length of address string (positive), or negative error code on failure
+ */
+int32_t zsig_derive_orchard_address_secure(const uint8_t* encrypted_mnemonic,
+                                            size_t encrypted_mnemonic_len,
+                                            const void* se_key_ref,
+                                            const char* hkdf_salt,
+                                            uint32_t coin_type,
+                                            uint32_t account,
+                                            bool mainnet,
+                                            uint8_t* output,
+                                            size_t output_len);
+
+/*
+ * Derive transparent P2PKH address from SE-encrypted mnemonic.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   account:                Account index
+ *   index:                  Address index
+ *   mainnet:                true for mainnet (t1...), false for testnet
+ *   output:                 Buffer for null-terminated address string (at least 64 bytes)
+ *   output_len:             Size of output buffer
+ *
+ * Returns:
+ *   Length of address string (positive), or negative error code on failure
+ */
+int32_t zsig_derive_transparent_address_secure(const uint8_t* encrypted_mnemonic,
+                                                size_t encrypted_mnemonic_len,
+                                                const void* se_key_ref,
+                                                const char* hkdf_salt,
+                                                uint32_t account,
+                                                uint32_t index,
+                                                bool mainnet,
+                                                uint8_t* output,
+                                                size_t output_len);
+
+/*
+ * Derive transparent pubkey hash (20 bytes) from SE-encrypted mnemonic.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   account:                Account index
+ *   index:                  Address index
+ *   hash_out:               Buffer for 20-byte pubkey hash output
+ *
+ * Returns:
+ *   ZSIG_SUCCESS (0) on success, or a ZsigError code on failure
+ */
+int32_t zsig_derive_transparent_pubkey_hash_secure(const uint8_t* encrypted_mnemonic,
+                                                    size_t encrypted_mnemonic_len,
+                                                    const void* se_key_ref,
+                                                    const char* hkdf_salt,
+                                                    uint32_t account,
+                                                    uint32_t index,
+                                                    uint8_t* hash_out);
+
+/*
+ * Derive Combined UFVK string from SE-encrypted mnemonic.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   coin_type:              Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account:                Account index
+ *   mainnet:                true for mainnet, false for testnet
+ *   output:                 Buffer for null-terminated UFVK string (at least 512 bytes)
+ *   output_len:             Size of output buffer
+ *
+ * Returns:
+ *   Length of UFVK string (positive), or negative error code on failure
+ */
+int32_t zsig_derive_combined_ufvk_string_secure(const uint8_t* encrypted_mnemonic,
+                                                  size_t encrypted_mnemonic_len,
+                                                  const void* se_key_ref,
+                                                  const char* hkdf_salt,
+                                                  uint32_t coin_type,
+                                                  uint32_t account,
+                                                  bool mainnet,
+                                                  uint8_t* output,
+                                                  size_t output_len);
+
+/*
+ * Derive first valid diversifier index from SE-encrypted mnemonic.
+ *
+ * Parameters:
+ *   encrypted_mnemonic:     SE-encrypted mnemonic blob
+ *   encrypted_mnemonic_len: Length of encrypted mnemonic
+ *   se_key_ref:             Opaque Secure Enclave key reference
+ *   hkdf_salt:              Null-terminated HKDF salt string
+ *   coin_type:              Coin type (ZSIG_MAINNET_COIN_TYPE = 133)
+ *   account:                Account index
+ *   index_out:              Pointer to receive first valid diversifier index
+ *   diversifier_out:        Optional pointer to receive 11-byte diversifier (can be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS (0) on success, or a ZsigError code on failure
+ */
+int32_t zsig_derive_first_valid_diversifier_index_secure(const uint8_t* encrypted_mnemonic,
+                                                          size_t encrypted_mnemonic_len,
+                                                          const void* se_key_ref,
+                                                          const char* hkdf_salt,
+                                                          uint32_t coin_type,
+                                                          uint32_t account,
+                                                          uint64_t* index_out,
+                                                          uint8_t* diversifier_out);
 
 /* ============================================================================
  * Utility Functions
