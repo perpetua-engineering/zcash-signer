@@ -22,6 +22,16 @@ const ORCHARD_ASK: u8 = 0x06;
 
 /// Domain separator for Sapling ask derivation
 const SAPLING_ASK: u8 = 0x00;
+const SAPLING_NSK: u8 = 0x01;
+const SAPLING_OVK: u8 = 0x02;
+const SAPLING_DK: u8 = 0x10;
+
+/// Domain separators for Sapling child derivation (ZIP-32)
+const SAPLING_ZIP32_CHILD_HARDENED: u8 = 0x11;
+const SAPLING_ZIP32_CHILD_ASK: u8 = 0x13;
+const SAPLING_ZIP32_CHILD_NSK: u8 = 0x14;
+const SAPLING_ZIP32_CHILD_OVK: u8 = 0x15;
+const SAPLING_ZIP32_CHILD_DK: u8 = 0x16;
 
 // -----------------------------------------------------------------------------
 // Helper Functions
@@ -106,11 +116,11 @@ impl SaplingExtendedKey {
 
         // Expand sk_m to (ask, nsk, ovk) per ZIP-32
         let ask = JubjubScalar::from_bytes_wide(&prf_expand(&sk_m, SAPLING_ASK));
-        let nsk = JubjubScalar::from_bytes_wide(&prf_expand(&sk_m, 0x01)); // NSK
-        let ovk_exp = prf_expand(&sk_m, 0x02); // OVK
+        let nsk = JubjubScalar::from_bytes_wide(&prf_expand(&sk_m, SAPLING_NSK));
+        let ovk_exp = prf_expand(&sk_m, SAPLING_OVK);
         let mut ovk = [0u8; 32];
         ovk.copy_from_slice(&ovk_exp[..32]);
-        let dk_exp = prf_expand(&sk_m, 0x10); // master DK
+        let dk_exp = prf_expand(&sk_m, SAPLING_DK); // master DK
         let mut dk = [0u8; 32];
         dk.copy_from_slice(&dk_exp[..32]);
 
@@ -141,7 +151,7 @@ impl SaplingExtendedKey {
                 .personal(PRF_EXPAND_PERSONALIZATION)
                 .to_state()
                 .update(&self.chain_code)
-                .update(&[0x11]) // SAPLING_ZIP32_CHILD_HARDENED
+                .update(&[SAPLING_ZIP32_CHILD_HARDENED])
                 .update(&expsk_bytes)
                 .update(&self.dk)
                 .update(&index_le)
@@ -156,10 +166,10 @@ impl SaplingExtendedKey {
         c_i.copy_from_slice(&tmp[32..]);
 
         // child_ask = parent_ask + from_bytes_wide(PRF^expand(i_l, 0x13))
-        let child_ask = self.ask + JubjubScalar::from_bytes_wide(&prf_expand(&i_l, 0x13));
+        let child_ask = self.ask + JubjubScalar::from_bytes_wide(&prf_expand(&i_l, SAPLING_ZIP32_CHILD_ASK));
 
         // child_nsk = parent_nsk + from_bytes_wide(PRF^expand(i_l, 0x14))
-        let child_nsk = self.nsk + JubjubScalar::from_bytes_wide(&prf_expand(&i_l, 0x14));
+        let child_nsk = self.nsk + JubjubScalar::from_bytes_wide(&prf_expand(&i_l, SAPLING_ZIP32_CHILD_NSK));
 
         // child_ovk = truncate_32(PRF^expand(i_l, 0x15 || parent_ovk))
         let child_ovk = {
@@ -168,7 +178,7 @@ impl SaplingExtendedKey {
                 .personal(PRF_EXPAND_PERSONALIZATION)
                 .to_state()
                 .update(&i_l)
-                .update(&[0x15])
+                .update(&[SAPLING_ZIP32_CHILD_OVK])
                 .update(&self.ovk)
                 .finalize();
             let mut out = [0u8; 32];
@@ -183,7 +193,7 @@ impl SaplingExtendedKey {
                 .personal(PRF_EXPAND_PERSONALIZATION)
                 .to_state()
                 .update(&i_l)
-                .update(&[0x16])
+                .update(&[SAPLING_ZIP32_CHILD_DK])
                 .update(&self.dk)
                 .finalize();
             let mut out = [0u8; 32];

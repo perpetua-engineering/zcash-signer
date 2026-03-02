@@ -18,7 +18,7 @@ use sinsemilla::CommitDomain;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 use k256::{Scalar, SecretKey, elliptic_curve::sec1::ToEncodedPoint};
-use jubjub::{Fr as JubjubScalar, ExtendedPoint as JubjubPoint, AffinePoint as JubjubAffine};
+use jubjub::{ExtendedPoint as JubjubPoint, AffinePoint as JubjubAffine};
 use reddsa::sapling::SpendAuth as SaplingSpendAuth;
 
 type HmacSha512 = Hmac<Sha512>;
@@ -35,11 +35,6 @@ const ORCHARD_ASK: u8 = 0x06;
 const ORCHARD_NK: u8 = 0x07;
 const ORCHARD_RIVK: u8 = 0x08;
 const ORCHARD_DK_OVK: u8 = 0x82;
-
-/// Domain separators for Sapling key derivation
-const SAPLING_ASK: u8 = 0x00;
-const SAPLING_NSK: u8 = 0x01;
-const SAPLING_OVK: u8 = 0x02;
 
 /// Sinsemilla domain for commit_ivk
 const COMMIT_IVK_PERSONALIZATION: &str = "z.cash:Orchard-CommitIvk";
@@ -433,11 +428,6 @@ fn derive_orchard_child(sk: &mut [u8; 32], chain_code: &mut [u8; 32], index: u32
 
 // Old derive_sapling_child removed — Sapling CKDh uses additive derivation via
 // SaplingExtendedKey in keys.rs. See crate::keys::SaplingExtendedKey.
-
-/// Convert 64 bytes to Jubjub scalar (mod r)
-fn to_jubjub_scalar(bytes: &[u8; 64]) -> JubjubScalar {
-    JubjubScalar::from_bytes_wide(bytes)
-}
 
 /// Sapling Nullifier proving key basepoint (PROOF_GENERATION_KEY_GENERATOR)
 /// This is H = group_hash("Zcash_H_", "") used for nk = nsk * H
