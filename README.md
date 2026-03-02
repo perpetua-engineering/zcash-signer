@@ -6,8 +6,8 @@ Minimal Zcash signing primitives for watchOS. This crate provides the cryptograp
 
 - **ZIP-32 Orchard key derivation** - Derive spending keys and `ask` from BIP-39 seeds
 - **ZIP-32 Sapling key derivation** - Derive Sapling spending keys and `ask` for legacy shielded funds
-- **RedPallas randomized signing** - Sign Orchard spends with alpha randomizers for PCZT
-- **RedJubjub randomized signing** - Sign Sapling spends with alpha randomizers for PCZT
+- **RedPallas signing** - Sign Orchard spends for PCZT
+- **RedJubjub signing** - Sign Sapling spends for PCZT
 - **Combined UFVK generation** - Produce Unified Full Viewing Keys with Transparent + Sapling + Orchard
 - **BIP-44 transparent addresses** - Derive t-addresses for CEX compatibility
 - **PCZT signing** — Sign full PCZTs (Orchard, Sapling, transparent) in one call
@@ -98,16 +98,22 @@ let saplingAk = try saplingAsk.deriveAk()  // 32 bytes
 ### PCZT Signing
 
 ```swift
-// Sign an Orchard spend with alpha randomizer (from PCZT)
-let sighash: Data = ...  // 32-byte transaction sighash
-let alpha: Data = ...    // 32-byte alpha randomizer from PCZT spend
+// Sign a full PCZT (preferred — handles alpha generation internally)
+let pcztData: Data = ...  // raw PCZT binary from phone
+let spendingKey = try ZcashOrchardSpendingKey.deriveFromSeed(seed, account: 0)
 
-let orchardSig = try orchardAsk.signRandomized(sighash: sighash, alpha: alpha)
-// signature is 64 bytes (R || S)
+let signedPczt = try pcztSign(
+    pcztData: pcztData,
+    orchardSpendingKey: spendingKey.bytes,
+    saplingAsk: saplingAsk.bytes
+)
 
-// Sign a Sapling spend with alpha randomizer
-let saplingSig = try saplingAsk.signRandomized(sighash: sighash, alpha: alpha)
-// signature is 64 bytes (R || S)
+// Or with SE-encrypted mnemonic (keys never leave Rust)
+let signedPczt = try pcztSignSecure(
+    pcztData: pcztData,
+    encryptedMnemonic: encryptedBlob,
+    account: 0
+)
 ```
 
 ### UFVK Derivation
@@ -163,8 +169,7 @@ For direct C/Objective-C usage:
 | `zsig_derive_orchard_spending_key` | ZIP-32 spending key from seed |
 | `zsig_derive_orchard_ask` | Extract ask from spending key |
 | `zsig_derive_orchard_ask_from_seed` | Convenience: ask directly from seed |
-| `zsig_sign_orchard_randomized` | PCZT signing with alpha randomizer |
-| `zsig_sign_orchard` | Non-randomized signing |
+| `zsig_sign_orchard` | Sign with spend authorization key |
 | `zsig_verify_orchard` | Signature verification |
 | `zsig_derive_ak_from_ask` | Derive authorization key |
 | `zsig_derive_orchard_full_viewing_key` | Derive Orchard FVK (ak, nk, rivk) |
@@ -176,8 +181,7 @@ For direct C/Objective-C usage:
 | `zsig_derive_sapling_spending_key` | ZIP-32 spending key from seed |
 | `zsig_derive_sapling_ask` | Extract ask from spending key |
 | `zsig_derive_sapling_ask_from_seed` | Convenience: ask directly from seed |
-| `zsig_sign_sapling_randomized` | PCZT signing with alpha randomizer |
-| `zsig_sign_sapling` | Non-randomized signing |
+| `zsig_sign_sapling` | Sign with spend authorization key |
 | `zsig_verify_sapling` | Signature verification |
 | `zsig_derive_sapling_ak_from_ask` | Derive authorization key |
 | `zsig_derive_sapling_full_viewing_key` | Derive Sapling FVK (ak, nk, ovk, dk) |
@@ -228,23 +232,17 @@ Phone (SDK)                          Watch (this crate)
 ─────────────────────────────────────────────────────────
 1. Build PCZT with:
    - Transaction structure
-   - Alpha randomizers
-   - Sighash
+   - Spend descriptors
                     ──────────────►
-                                     2. For each Orchard spend:
-                                        ask_rand = ask + alpha
-                                        sig = RedPallas::sign(ask_rand, sighash)
-
-                                     3. For each Sapling spend:
-                                        ask_rand = ask + alpha
-                                        sig = RedJubjub::sign(ask_rand, sighash)
-
-                                     4. For each transparent input:
-                                        sig = ECDSA::sign_prehash(privkey, sighash)
+                                     2. zsig_pczt_sign_secure:
+                                        - Decrypt SE-encrypted mnemonic
+                                        - Derive keys per pool
+                                        - Sign all Orchard, Sapling, transparent
+                                        - Zeroize keys on drop
                     ◄──────────────
-5. Apply signatures to PCZT
-6. Generate zk-SNARK proofs
-7. Broadcast transaction
+3. Apply signed PCZT
+4. Generate zk-SNARK proofs
+5. Broadcast transaction
 ```
 
 #### Secure signing path (`zsig_pczt_sign_secure`)
@@ -314,9 +312,9 @@ swift build --product pczt-cli
 ### Complete Shielding Flow
 
 ```bash
-# 1. Initialize wallet (derives UFVK for phone, ASK for watch)
+# 1. Initialize wallet (derives UFVK for phone)
 pczt-cli init
-# Outputs: { "ufvk": "uview1...", "ask": "abc123..." }
+# Outputs: { "ufvk": "uview1..." }
 
 # 2. Sync with lightwalletd
 pczt-cli sync
@@ -329,89 +327,26 @@ pczt-cli propose shield 100000
 pczt-cli create-pczt <proposal_id>
 # Outputs: { "pczt_file": "~/.pczt-cli/pczts/pczt_xxx.bin" }
 
-# 5. Extract sighashes (what the watch needs to sign)
-pczt-cli extract-sighashes <pczt_file> > sighashes.json
-
-# 6. Sign on watch (simulated - uses ASK for Orchard, ZCASH_SEED for transparent)
-pczt-cli sign <ask> sighashes.json > signatures.json
-
-# 7. Apply signatures back to PCZT
-pczt-cli apply-signatures <pczt_file> signatures.json
+# 5. Sign PCZT (simulates watch — derives keys from seed, signs all pools)
+pczt-cli sign <pczt_file>
 # Outputs: { "pczt_file": "~/.pczt-cli/pczts/pczt_xxx_signed.bin" }
 
-# 8. Generate zk-SNARK proofs (phone)
+# 6. Generate zk-SNARK proofs (phone)
 pczt-cli prove <pczt_file>
 # Outputs: { "pczt_file": "~/.pczt-cli/pczts/pczt_xxx_proven.bin" }
 
-# 9. Broadcast (combines proven + signed PCZTs)
+# 7. Broadcast (combines proven + signed PCZTs)
 pczt-cli broadcast <proven_pczt> <signed_pczt>
 # Outputs: { "success": true, "txid": "267a2d9e..." }
 ```
 
 ### Key Insights for PCZT Integration
 
-1. **Dummy Orchard Spends**: Shielding transactions have dummy Orchard spends (no real inputs). These are signed during IO Finalization with an internal key. Check `alreadySigned` field and skip signing these.
+1. **Dummy Orchard Spends**: Shielding transactions have dummy Orchard spends (no real inputs). These are signed during IO Finalization with an internal key. The Signer role handles these automatically.
 
-2. **Transparent Signature Format**: The signature must be `<DER_encoded_sig || sighash_type_byte>`. Don't forget to append `0x01` (SIGHASH_ALL) to the DER signature.
+2. **Split Sign/Prove Flow**: Signatures and proofs can be generated independently and combined at broadcast time. This enables the watch to sign while the phone generates proofs in parallel.
 
-3. **Pre-hashed Signing**: The sighash is already a 32-byte hash. Use `sign_prehash()` (not `sign()`) to avoid double-hashing.
-
-4. **Split Sign/Prove Flow**: Signatures and proofs can be generated independently and combined at broadcast time. This enables the watch to sign while the phone generates proofs in parallel.
-
-### Sighashes JSON Format
-
-```json
-{
-  "shielded_sighash": "902f7029...",
-  "orchard_spends": [
-    {
-      "index": 0,
-      "randomizer": "4c75483a...",
-      "rk": "abc123...",
-      "already_signed": true
-    }
-  ],
-  "sapling_spends": [
-    {
-      "index": 0,
-      "randomizer": "5d86594b...",
-      "rk": "def456...",
-      "already_signed": false
-    }
-  ],
-  "transparent_inputs": [
-    {
-      "index": 0,
-      "sighash": "5cc4bafe...",
-      "sighash_type": 1,
-      "derivation_path": [2147483692, 2147483781, 2147483648, 0, 0],
-      "script_pub_key": "76a914...",
-      "value": 2693748
-    }
-  ]
-}
-```
-
-### Signatures JSON Format
-
-```json
-{
-  "orchard_signatures": [
-    { "index": 0, "signature": "64-byte-hex" }
-  ],
-  "sapling_signatures": [
-    { "index": 0, "signature": "64-byte-hex" }
-  ],
-  "transparent_signatures": [
-    {
-      "index": 0,
-      "signature": "DER-sig-with-hashtype-hex",
-      "public_key": "33-byte-compressed-pubkey-hex",
-      "sighash_type": 1
-    }
-  ]
-}
-```
+3. **Alpha Handling**: The upstream `pczt` Signer role generates alpha randomizers internally with proper rejection sampling. Callers never need to handle raw scalars.
 
 ## License
 
