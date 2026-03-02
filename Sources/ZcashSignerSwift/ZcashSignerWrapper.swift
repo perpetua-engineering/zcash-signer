@@ -202,54 +202,6 @@ public struct ZcashOrchardAsk {
         return Data(ak)
     }
 
-    /// Sign a sighash using RedPallas with a randomized key (PCZT signing)
-    ///
-    /// - Important: Deprecated. Use ``ZcashSigner/signPczt`` or ``ZcashSigner/signPcztSecure``
-    ///   instead — they handle alpha generation internally with proper rejection sampling.
-    ///
-    /// `alpha` must be a canonical Pallas scalar (< field order q ≈ 2^254), not raw random bytes.
-    /// Passing 32 bytes of uniform randomness will fail ~75% of the time.
-    /// Only use alpha values obtained from a PCZT structure.
-    ///
-    /// - Parameters:
-    ///   - sighash: The 32-byte transaction sighash
-    ///   - alpha: The 32-byte canonical Pallas scalar from the PCZT
-    /// - Returns: The 64-byte RedPallas signature
-    @available(*, deprecated, message: "Use signPczt or signPcztSecure instead")
-    public func signRandomized(sighash: Data, alpha: Data) throws -> Data {
-        guard sighash.count == 32 else {
-            throw ZcashSignerError.invalidKey
-        }
-        guard alpha.count == 32 else {
-            throw ZcashSignerError.invalidKey
-        }
-
-        var askFFI = ZsigOrchardAsk()
-        bytes.withUnsafeBytes { ptr in
-            _ = memcpy(&askFFI.bytes, ptr.baseAddress!, 32)
-        }
-
-        var signature = ZsigOrchardSignature()
-
-        let result = sighash.withUnsafeBytes { sighashPtr in
-            alpha.withUnsafeBytes { alphaPtr in
-                zsig_sign_orchard_randomized(
-                    &askFFI,
-                    alphaPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    sighashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    &signature,
-                    secureRandomCallback
-                )
-            }
-        }
-
-        guard result.rawValue == 0 else {
-            throw ZcashSignerError(code: result.rawValue)
-        }
-
-        return Data(bytes: &signature.bytes, count: 64)
-    }
-
     /// Sign a message using RedPallas (non-randomized, for testing)
     ///
     /// - Parameter message: The message to sign
@@ -348,54 +300,6 @@ public struct ZcashSaplingAsk {
         }
 
         return Data(ak)
-    }
-
-    /// Sign a sighash using RedJubjub with a randomized key (PCZT signing)
-    ///
-    /// - Important: Deprecated. Use ``ZcashSigner/signPczt`` or ``ZcashSigner/signPcztSecure``
-    ///   instead — they handle alpha generation internally with proper rejection sampling.
-    ///
-    /// `alpha` must be a canonical Jubjub scalar (< field order r ≈ 2^252), not raw random bytes.
-    /// Passing 32 bytes of uniform randomness will fail ~94% of the time.
-    /// Only use alpha values obtained from a PCZT structure.
-    ///
-    /// - Parameters:
-    ///   - sighash: The 32-byte transaction sighash
-    ///   - alpha: The 32-byte canonical Jubjub scalar from the PCZT
-    /// - Returns: The 64-byte RedJubjub signature
-    @available(*, deprecated, message: "Use signPczt or signPcztSecure instead")
-    public func signRandomized(sighash: Data, alpha: Data) throws -> Data {
-        guard sighash.count == 32 else {
-            throw ZcashSignerError.invalidKey
-        }
-        guard alpha.count == 32 else {
-            throw ZcashSignerError.invalidKey
-        }
-
-        var askFFI = ZsigSaplingAsk()
-        bytes.withUnsafeBytes { ptr in
-            _ = memcpy(&askFFI.bytes, ptr.baseAddress!, 32)
-        }
-
-        var signature = ZsigSaplingSignature()
-
-        let result = sighash.withUnsafeBytes { sighashPtr in
-            alpha.withUnsafeBytes { alphaPtr in
-                zsig_sign_sapling_randomized(
-                    &askFFI,
-                    alphaPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    sighashPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                    &signature,
-                    secureRandomCallback
-                )
-            }
-        }
-
-        guard result.rawValue == 0 else {
-            throw ZcashSignerError(code: result.rawValue)
-        }
-
-        return Data(bytes: &signature.bytes, count: 64)
     }
 
     /// Sign a message using RedJubjub (non-randomized, for testing)

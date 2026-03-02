@@ -1,99 +1,17 @@
 //! RedPallas/RedJubjub signing for Orchard and Sapling
 //!
-//! Implements randomized signing for PCZT (Partially Created Zcash Transaction)
+//! Non-randomized signing and verification for testing.
+//! For PCZT transaction signing, use `zsig_pczt_sign` or `zsig_pczt_sign_secure`
+//! which handle alpha randomization internally via the upstream Signer role.
 
 use core::slice;
 use crate::{ZsigError, ZsigOrchardAsk, ZsigOrchardSignature, ZsigSaplingAsk, ZsigSaplingSignature, CallbackRng, ZsigRngCallback};
-use ff::PrimeField;
-use pasta_curves::pallas::Scalar as PallasScalar;
-use jubjub::Fr as JubjubScalar;
 use reddsa::orchard::SpendAuth as OrchardSpendAuth;
 use reddsa::sapling::SpendAuth as SaplingSpendAuth;
 
 // -----------------------------------------------------------------------------
 // FFI Functions
 // -----------------------------------------------------------------------------
-
-/// Sign a message using RedPallas with randomized key
-///
-/// # Deprecated
-/// Use `zsig_pczt_sign` or `zsig_pczt_sign_secure` instead — they use the
-/// upstream `Signer` role which generates alpha internally with proper
-/// rejection sampling.
-///
-/// # Alpha encoding caveat
-/// `alpha` must be a **canonical Pallas scalar** (little-endian, < field order q ≈ 2^254).
-/// Passing 32 bytes of uniform randomness (e.g. raw `SecRandomCopyBytes` output) will
-/// fail ~75% of the time (`ScalarConversionFailed`) because most 256-bit values exceed q.
-/// To produce a valid alpha from raw randomness, use 64 bytes and reduce via
-/// `PallasScalar::from_uniform_bytes`, or use rejection sampling.
-///
-/// For PCZT signing, each Orchard spend has an alpha randomizer.
-/// The signature must verify against rk = ak + [alpha]G, so we sign
-/// with the randomized key: ask_randomized = ask + alpha.
-///
-/// # Safety
-/// - `ask` must point to a valid ZsigOrchardAsk
-/// - `alpha` must point to 32 bytes encoding a canonical Pallas scalar (see caveat above)
-/// - `sighash` must point to 32 readable bytes (the transaction sighash)
-/// - `signature_out` must point to valid memory for a ZsigOrchardSignature
-/// - `rng_callback` must be a valid function pointer for SecRandomCopyBytes
-#[deprecated(note = "Use zsig_pczt_sign or zsig_pczt_sign_secure instead")]
-#[no_mangle]
-pub unsafe extern "C" fn zsig_sign_orchard_randomized(
-    ask: *const ZsigOrchardAsk,
-    alpha: *const u8,
-    sighash: *const u8,
-    signature_out: *mut ZsigOrchardSignature,
-    rng_callback: ZsigRngCallback,
-) -> ZsigError {
-    if ask.is_null() || alpha.is_null() || sighash.is_null() || signature_out.is_null() {
-        return ZsigError::NullPointer;
-    }
-
-    let mut rng = CallbackRng::new(rng_callback);
-    let sighash_bytes: [u8; 32] = slice::from_raw_parts(sighash, 32).try_into().unwrap();
-    let ask_bytes = (*ask).bytes;
-    let alpha_bytes: [u8; 32] = slice::from_raw_parts(alpha, 32).try_into().unwrap();
-
-    // Parse both scalars
-    let ask_opt = PallasScalar::from_repr(ask_bytes.into());
-    let ask_scalar: PallasScalar = match Option::<PallasScalar>::from(ask_opt) {
-        Some(s) => s,
-        None => return ZsigError::ScalarConversionFailed,
-    };
-
-    let alpha_opt = PallasScalar::from_repr(alpha_bytes.into());
-    let alpha_scalar: PallasScalar = match Option::<PallasScalar>::from(alpha_opt) {
-        Some(s) => s,
-        None => return ZsigError::ScalarConversionFailed,
-    };
-
-    // Compute randomized signing key: ask + alpha (mod q)
-    // This is the core PCZT signing operation
-    let ask_randomized: PallasScalar = ask_scalar + alpha_scalar;
-
-    // Convert back to bytes for reddsa SigningKey
-    let randomized_bytes: [u8; 32] = ask_randomized.to_repr().into();
-
-    // Create SigningKey from randomized bytes
-    let sk: reddsa::SigningKey<OrchardSpendAuth> = match reddsa::SigningKey::try_from(randomized_bytes) {
-        Ok(k) => k,
-        Err(_) => return ZsigError::InvalidKey,
-    };
-
-    // Sign the sighash
-    let sig: reddsa::Signature<OrchardSpendAuth> = sk.sign(&mut rng, &sighash_bytes);
-
-    if rng.has_failed() {
-        return ZsigError::RngFailed;
-    }
-
-    // Extract signature bytes
-    (*signature_out).bytes = sig.into();
-
-    ZsigError::Success
-}
 
 /// Maximum message length for non-randomized signing (1 MB)
 const MAX_MESSAGE_LEN: usize = 1024 * 1024;
@@ -224,87 +142,6 @@ pub unsafe extern "C" fn zsig_derive_ak_from_ask(
 // -----------------------------------------------------------------------------
 // Sapling FFI Functions
 // -----------------------------------------------------------------------------
-
-/// Sign a message using RedJubjub with randomized key
-///
-/// # Deprecated
-/// Use `zsig_pczt_sign` or `zsig_pczt_sign_secure` instead — they use the
-/// upstream `Signer` role which generates alpha internally with proper
-/// rejection sampling.
-///
-/// # Alpha encoding caveat
-/// `alpha` must be a **canonical Jubjub scalar** (little-endian, < field order r ≈ 2^252).
-/// Passing 32 bytes of uniform randomness (e.g. raw `SecRandomCopyBytes` output) will
-/// fail ~94% of the time (`ScalarConversionFailed`) because most 256-bit values exceed r.
-/// To produce a valid alpha from raw randomness, use 64 bytes and reduce via
-/// `JubjubScalar::from_bytes_wide`, or use rejection sampling.
-///
-/// For PCZT signing, each Sapling spend has an alpha randomizer.
-/// The signature must verify against rk = ak + [alpha]G, so we sign
-/// with the randomized key: ask_randomized = ask + alpha.
-///
-/// # Safety
-/// - `ask` must point to a valid ZsigSaplingAsk
-/// - `alpha` must point to 32 bytes encoding a canonical Jubjub scalar (see caveat above)
-/// - `sighash` must point to 32 readable bytes (the transaction sighash)
-/// - `signature_out` must point to valid memory for a ZsigSaplingSignature
-/// - `rng_callback` must be a valid function pointer for SecRandomCopyBytes
-#[deprecated(note = "Use zsig_pczt_sign or zsig_pczt_sign_secure instead")]
-#[no_mangle]
-pub unsafe extern "C" fn zsig_sign_sapling_randomized(
-    ask: *const ZsigSaplingAsk,
-    alpha: *const u8,
-    sighash: *const u8,
-    signature_out: *mut ZsigSaplingSignature,
-    rng_callback: ZsigRngCallback,
-) -> ZsigError {
-    if ask.is_null() || alpha.is_null() || sighash.is_null() || signature_out.is_null() {
-        return ZsigError::NullPointer;
-    }
-
-    let mut rng = CallbackRng::new(rng_callback);
-    let sighash_bytes: [u8; 32] = slice::from_raw_parts(sighash, 32).try_into().unwrap();
-    let ask_bytes = (*ask).bytes;
-    let alpha_bytes: [u8; 32] = slice::from_raw_parts(alpha, 32).try_into().unwrap();
-
-    // Parse both scalars (Jubjub field)
-    let ask_opt = JubjubScalar::from_bytes(&ask_bytes);
-    let ask_scalar: JubjubScalar = match Option::<JubjubScalar>::from(ask_opt) {
-        Some(s) => s,
-        None => return ZsigError::ScalarConversionFailed,
-    };
-
-    let alpha_opt = JubjubScalar::from_bytes(&alpha_bytes);
-    let alpha_scalar: JubjubScalar = match Option::<JubjubScalar>::from(alpha_opt) {
-        Some(s) => s,
-        None => return ZsigError::ScalarConversionFailed,
-    };
-
-    // Compute randomized signing key: ask + alpha (mod r)
-    // This is the core PCZT signing operation
-    let ask_randomized: JubjubScalar = ask_scalar + alpha_scalar;
-
-    // Convert back to bytes for reddsa SigningKey
-    let randomized_bytes: [u8; 32] = ask_randomized.to_bytes();
-
-    // Create SigningKey from randomized bytes
-    let sk: reddsa::SigningKey<SaplingSpendAuth> = match reddsa::SigningKey::try_from(randomized_bytes) {
-        Ok(k) => k,
-        Err(_) => return ZsigError::InvalidKey,
-    };
-
-    // Sign the sighash
-    let sig: reddsa::Signature<SaplingSpendAuth> = sk.sign(&mut rng, &sighash_bytes);
-
-    if rng.has_failed() {
-        return ZsigError::RngFailed;
-    }
-
-    // Extract signature bytes
-    (*signature_out).bytes = sig.into();
-
-    ZsigError::Success
-}
 
 /// Sign a message using RedJubjub (non-randomized)
 ///

@@ -244,29 +244,6 @@ ZsigError zsig_derive_sapling_ask_from_seed(const uint8_t* seed,
  * ============================================================================ */
 
 /*
- * Sign using RedPallas with randomized key (main PCZT signing function)
- *
- * For PCZT signing, each Orchard spend has an alpha randomizer.
- * The signature verifies against rk = ak + [alpha]G, so we sign with
- * the randomized key: ask_randomized = ask + alpha.
- *
- * Parameters:
- *   ask: Pointer to the spend authorization key (must not be NULL)
- *   alpha: Pointer to 32-byte alpha randomizer from PCZT (must not be NULL)
- *   sighash: Pointer to 32-byte transaction sighash (must not be NULL)
- *   signature_out: Pointer to receive the signature (must not be NULL)
- *   rng: Callback function for random number generation
- *
- * Returns:
- *   ZSIG_SUCCESS on success, error code on failure
- */
-ZsigError zsig_sign_orchard_randomized(const ZsigOrchardAsk* ask,
-                                        const uint8_t* alpha,
-                                        const uint8_t* sighash,
-                                        ZsigOrchardSignature* signature_out,
-                                        ZsigRngCallback rng);
-
-/*
  * Sign using RedPallas (non-randomized, for testing)
  *
  * Parameters:
@@ -320,29 +297,6 @@ ZsigError zsig_derive_ak_from_ask(const ZsigOrchardAsk* ask,
 /* ============================================================================
  * RedJubjub Signing (Sapling)
  * ============================================================================ */
-
-/*
- * Sign using RedJubjub with randomized key (main PCZT Sapling signing function)
- *
- * For PCZT signing, each Sapling spend has an alpha randomizer.
- * The signature verifies against rk = ak + [alpha]G, so we sign with
- * the randomized key: ask_randomized = ask + alpha.
- *
- * Parameters:
- *   ask: Pointer to the spend authorization key (must not be NULL)
- *   alpha: Pointer to 32-byte alpha randomizer from PCZT (must not be NULL)
- *   sighash: Pointer to 32-byte transaction sighash (must not be NULL)
- *   signature_out: Pointer to receive the signature (must not be NULL)
- *   rng: Callback function for random number generation
- *
- * Returns:
- *   ZSIG_SUCCESS on success, error code on failure
- */
-ZsigError zsig_sign_sapling_randomized(const ZsigSaplingAsk* ask,
-                                        const uint8_t* alpha,
-                                        const uint8_t* sighash,
-                                        ZsigSaplingSignature* signature_out,
-                                        ZsigRngCallback rng);
 
 /*
  * Sign using RedJubjub (non-randomized, for testing)
