@@ -244,15 +244,24 @@ ZsigError zsig_derive_sapling_ask_from_seed(const uint8_t* seed,
  * ============================================================================ */
 
 /*
- * Sign using RedPallas with randomized key (main PCZT signing function)
+ * DEPRECATED: Use zsig_pczt_sign or zsig_pczt_sign_secure instead.
+ * Those functions use the upstream Signer role which generates alpha
+ * internally with proper rejection sampling.
+ *
+ * Sign using RedPallas with randomized key.
  *
  * For PCZT signing, each Orchard spend has an alpha randomizer.
  * The signature verifies against rk = ak + [alpha]G, so we sign with
  * the randomized key: ask_randomized = ask + alpha.
  *
+ * IMPORTANT: alpha must be a canonical Pallas scalar (little-endian, < q ≈ 2^254).
+ * Do NOT pass 32 bytes of uniform randomness — ~75% of 256-bit values exceed q
+ * and will return ZSIG_ERROR_SCALAR_CONVERSION_FAILED. Use 64 bytes with
+ * reduction, or pass alpha obtained from a PCZT structure.
+ *
  * Parameters:
  *   ask: Pointer to the spend authorization key (must not be NULL)
- *   alpha: Pointer to 32-byte alpha randomizer from PCZT (must not be NULL)
+ *   alpha: Pointer to 32-byte canonical Pallas scalar from PCZT (must not be NULL)
  *   sighash: Pointer to 32-byte transaction sighash (must not be NULL)
  *   signature_out: Pointer to receive the signature (must not be NULL)
  *   rng: Callback function for random number generation
@@ -322,15 +331,24 @@ ZsigError zsig_derive_ak_from_ask(const ZsigOrchardAsk* ask,
  * ============================================================================ */
 
 /*
- * Sign using RedJubjub with randomized key (main PCZT Sapling signing function)
+ * DEPRECATED: Use zsig_pczt_sign or zsig_pczt_sign_secure instead.
+ * Those functions use the upstream Signer role which generates alpha
+ * internally with proper rejection sampling.
+ *
+ * Sign using RedJubjub with randomized key.
  *
  * For PCZT signing, each Sapling spend has an alpha randomizer.
  * The signature verifies against rk = ak + [alpha]G, so we sign with
  * the randomized key: ask_randomized = ask + alpha.
  *
+ * IMPORTANT: alpha must be a canonical Jubjub scalar (little-endian, < r ≈ 2^252).
+ * Do NOT pass 32 bytes of uniform randomness — ~94% of 256-bit values exceed r
+ * and will return ZSIG_ERROR_SCALAR_CONVERSION_FAILED. Use 64 bytes with
+ * reduction, or pass alpha obtained from a PCZT structure.
+ *
  * Parameters:
  *   ask: Pointer to the spend authorization key (must not be NULL)
- *   alpha: Pointer to 32-byte alpha randomizer from PCZT (must not be NULL)
+ *   alpha: Pointer to 32-byte canonical Jubjub scalar from PCZT (must not be NULL)
  *   sighash: Pointer to 32-byte transaction sighash (must not be NULL)
  *   signature_out: Pointer to receive the signature (must not be NULL)
  *   rng: Callback function for random number generation

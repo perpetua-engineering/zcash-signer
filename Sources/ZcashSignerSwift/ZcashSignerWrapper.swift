@@ -204,14 +204,18 @@ public struct ZcashOrchardAsk {
 
     /// Sign a sighash using RedPallas with a randomized key (PCZT signing)
     ///
-    /// For PCZT signing, each Orchard spend has an alpha randomizer.
-    /// The signature verifies against rk = ak + [alpha]G, so we sign with
-    /// the randomized key: ask_randomized = ask + alpha.
+    /// - Important: Deprecated. Use ``ZcashSigner/signPczt`` or ``ZcashSigner/signPcztSecure``
+    ///   instead — they handle alpha generation internally with proper rejection sampling.
+    ///
+    /// `alpha` must be a canonical Pallas scalar (< field order q ≈ 2^254), not raw random bytes.
+    /// Passing 32 bytes of uniform randomness will fail ~75% of the time.
+    /// Only use alpha values obtained from a PCZT structure.
     ///
     /// - Parameters:
     ///   - sighash: The 32-byte transaction sighash
-    ///   - alpha: The 32-byte alpha randomizer from the PCZT
+    ///   - alpha: The 32-byte canonical Pallas scalar from the PCZT
     /// - Returns: The 64-byte RedPallas signature
+    @available(*, deprecated, message: "Use signPczt or signPcztSecure instead")
     public func signRandomized(sighash: Data, alpha: Data) throws -> Data {
         guard sighash.count == 32 else {
             throw ZcashSignerError.invalidKey
@@ -348,14 +352,18 @@ public struct ZcashSaplingAsk {
 
     /// Sign a sighash using RedJubjub with a randomized key (PCZT signing)
     ///
-    /// For PCZT signing, each Sapling spend has an alpha randomizer.
-    /// The signature verifies against rk = ak + [alpha]G, so we sign with
-    /// the randomized key: ask_randomized = ask + alpha.
+    /// - Important: Deprecated. Use ``ZcashSigner/signPczt`` or ``ZcashSigner/signPcztSecure``
+    ///   instead — they handle alpha generation internally with proper rejection sampling.
+    ///
+    /// `alpha` must be a canonical Jubjub scalar (< field order r ≈ 2^252), not raw random bytes.
+    /// Passing 32 bytes of uniform randomness will fail ~94% of the time.
+    /// Only use alpha values obtained from a PCZT structure.
     ///
     /// - Parameters:
     ///   - sighash: The 32-byte transaction sighash
-    ///   - alpha: The 32-byte alpha randomizer from the PCZT
+    ///   - alpha: The 32-byte canonical Jubjub scalar from the PCZT
     /// - Returns: The 64-byte RedJubjub signature
+    @available(*, deprecated, message: "Use signPczt or signPcztSecure instead")
     public func signRandomized(sighash: Data, alpha: Data) throws -> Data {
         guard sighash.count == 32 else {
             throw ZcashSignerError.invalidKey

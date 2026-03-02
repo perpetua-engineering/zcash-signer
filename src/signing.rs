@@ -16,18 +16,29 @@ use reddsa::sapling::SpendAuth as SaplingSpendAuth;
 
 /// Sign a message using RedPallas with randomized key
 ///
+/// # Deprecated
+/// Use `zsig_pczt_sign` or `zsig_pczt_sign_secure` instead — they use the
+/// upstream `Signer` role which generates alpha internally with proper
+/// rejection sampling.
+///
+/// # Alpha encoding caveat
+/// `alpha` must be a **canonical Pallas scalar** (little-endian, < field order q ≈ 2^254).
+/// Passing 32 bytes of uniform randomness (e.g. raw `SecRandomCopyBytes` output) will
+/// fail ~75% of the time (`ScalarConversionFailed`) because most 256-bit values exceed q.
+/// To produce a valid alpha from raw randomness, use 64 bytes and reduce via
+/// `PallasScalar::from_uniform_bytes`, or use rejection sampling.
+///
 /// For PCZT signing, each Orchard spend has an alpha randomizer.
 /// The signature must verify against rk = ak + [alpha]G, so we sign
 /// with the randomized key: ask_randomized = ask + alpha.
 ///
-/// This is the main signing function used by the watch for PCZT signing.
-///
 /// # Safety
 /// - `ask` must point to a valid ZsigOrchardAsk
-/// - `alpha` must point to 32 readable bytes (the randomizer scalar from PCZT)
+/// - `alpha` must point to 32 bytes encoding a canonical Pallas scalar (see caveat above)
 /// - `sighash` must point to 32 readable bytes (the transaction sighash)
 /// - `signature_out` must point to valid memory for a ZsigOrchardSignature
 /// - `rng_callback` must be a valid function pointer for SecRandomCopyBytes
+#[deprecated(note = "Use zsig_pczt_sign or zsig_pczt_sign_secure instead")]
 #[no_mangle]
 pub unsafe extern "C" fn zsig_sign_orchard_randomized(
     ask: *const ZsigOrchardAsk,
@@ -216,18 +227,29 @@ pub unsafe extern "C" fn zsig_derive_ak_from_ask(
 
 /// Sign a message using RedJubjub with randomized key
 ///
+/// # Deprecated
+/// Use `zsig_pczt_sign` or `zsig_pczt_sign_secure` instead — they use the
+/// upstream `Signer` role which generates alpha internally with proper
+/// rejection sampling.
+///
+/// # Alpha encoding caveat
+/// `alpha` must be a **canonical Jubjub scalar** (little-endian, < field order r ≈ 2^252).
+/// Passing 32 bytes of uniform randomness (e.g. raw `SecRandomCopyBytes` output) will
+/// fail ~94% of the time (`ScalarConversionFailed`) because most 256-bit values exceed r.
+/// To produce a valid alpha from raw randomness, use 64 bytes and reduce via
+/// `JubjubScalar::from_bytes_wide`, or use rejection sampling.
+///
 /// For PCZT signing, each Sapling spend has an alpha randomizer.
 /// The signature must verify against rk = ak + [alpha]G, so we sign
 /// with the randomized key: ask_randomized = ask + alpha.
 ///
-/// This is the main signing function used by the watch for PCZT Sapling signing.
-///
 /// # Safety
 /// - `ask` must point to a valid ZsigSaplingAsk
-/// - `alpha` must point to 32 readable bytes (the randomizer scalar from PCZT)
+/// - `alpha` must point to 32 bytes encoding a canonical Jubjub scalar (see caveat above)
 /// - `sighash` must point to 32 readable bytes (the transaction sighash)
 /// - `signature_out` must point to valid memory for a ZsigSaplingSignature
 /// - `rng_callback` must be a valid function pointer for SecRandomCopyBytes
+#[deprecated(note = "Use zsig_pczt_sign or zsig_pczt_sign_secure instead")]
 #[no_mangle]
 pub unsafe extern "C" fn zsig_sign_sapling_randomized(
     ask: *const ZsigSaplingAsk,
