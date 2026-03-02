@@ -18,7 +18,7 @@ use sinsemilla::CommitDomain;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 use k256::{Scalar, SecretKey, elliptic_curve::sec1::ToEncodedPoint};
-use jubjub::{Fr as JubjubScalar, ExtendedPoint as JubjubPoint, AffinePoint as JubjubAffine};
+use jubjub::{ExtendedPoint as JubjubPoint, AffinePoint as JubjubAffine};
 use reddsa::sapling::SpendAuth as SaplingSpendAuth;
 
 type HmacSha512 = Hmac<Sha512>;
@@ -35,11 +35,6 @@ const ORCHARD_ASK: u8 = 0x06;
 const ORCHARD_NK: u8 = 0x07;
 const ORCHARD_RIVK: u8 = 0x08;
 const ORCHARD_DK_OVK: u8 = 0x82;
-
-/// Domain separators for Sapling key derivation
-const SAPLING_ASK: u8 = 0x00;
-const SAPLING_NSK: u8 = 0x01;
-const SAPLING_OVK: u8 = 0x02;
 
 /// Sinsemilla domain for commit_ivk
 const COMMIT_IVK_PERSONALIZATION: &str = "z.cash:Orchard-CommitIvk";
@@ -431,26 +426,8 @@ fn derive_orchard_child(sk: &mut [u8; 32], chain_code: &mut [u8; 32], index: u32
     chain_code.copy_from_slice(&child[32..64]);
 }
 
-/// Derive a hardened Sapling child key using ZIP-32 CKDh
-fn derive_sapling_child(sk: &mut [u8; 32], chain_code: &mut [u8; 32], index: u32) {
-    let index_le = index.to_le_bytes();
-
-    // Build PRF^expand input: c_par || 0x11 || sk || i_le
-    let mut input = [0u8; 32 + 1 + 32 + 4]; // 69 bytes
-    input[..32].copy_from_slice(chain_code);
-    input[32] = 0x11; // SAPLING_ZIP32_CHILD domain separator
-    input[33..65].copy_from_slice(sk);
-    input[65..69].copy_from_slice(&index_le);
-
-    let child = blake2b_personal(PRF_EXPAND_PERSONALIZATION, &input);
-    sk.copy_from_slice(&child[..32]);
-    chain_code.copy_from_slice(&child[32..64]);
-}
-
-/// Convert 64 bytes to Jubjub scalar (mod r)
-fn to_jubjub_scalar(bytes: &[u8; 64]) -> JubjubScalar {
-    JubjubScalar::from_bytes_wide(bytes)
-}
+// Old derive_sapling_child removed — Sapling CKDh uses additive derivation via
+// SaplingExtendedKey in keys.rs. See crate::keys::SaplingExtendedKey.
 
 /// Sapling Nullifier proving key basepoint (PROOF_GENERATION_KEY_GENERATOR)
 /// This is H = group_hash("Zcash_H_", "") used for nk = nsk * H
@@ -872,62 +849,23 @@ pub unsafe extern "C" fn zsig_derive_sapling_full_viewing_key(
 
     let seed_slice = slice::from_raw_parts(seed, seed_len);
 
-    // ZIP-32 Sapling master key derivation
-    let master = blake2b_personal(b"ZcashIP32Sapling", seed_slice);
+    // Use proper ZIP-32 Sapling CKDh with additive derivation
+    let ext = crate::keys::SaplingExtendedKey::from_seed_at_path(seed_slice, coin_type, account);
 
-    let mut sk = [0u8; 32];
-    let mut chain_code = [0u8; 32];
-    sk.copy_from_slice(&master[..32]);
-    chain_code.copy_from_slice(&master[32..64]);
-
-    // Hardened child derivation: m/32'/coin_type'/account'
-    derive_sapling_child(&mut sk, &mut chain_code, 32 | 0x80000000);
-    derive_sapling_child(&mut sk, &mut chain_code, coin_type | 0x80000000);
-    derive_sapling_child(&mut sk, &mut chain_code, account | 0x80000000);
-
-    // Derive FVK components from spending key
-    // ask = PRF^expand(sk, 0x00)
-    let ask_expanded = prf_expand(&sk, SAPLING_ASK);
-    let mut ask = to_jubjub_scalar(&ask_expanded);
-
-    // nsk = PRF^expand(sk, 0x01)
-    let nsk_expanded = prf_expand(&sk, SAPLING_NSK);
-    let nsk = to_jubjub_scalar(&nsk_expanded);
-
-    // ovk = truncate_32(PRF^expand(sk, 0x02))
-    let ovk_expanded = prf_expand(&sk, SAPLING_OVK);
-    let mut ovk = [0u8; 32];
-    ovk.copy_from_slice(&ovk_expanded[..32]);
-
-    // dk (diversifier key) - derived from sk
-    // dk = truncate_32(PRF^expand(sk, 0x10))
-    let dk_expanded = prf_expand(&sk, 0x10);
-    let mut dk = [0u8; 32];
-    dk.copy_from_slice(&dk_expanded[..32]);
+    let nsk = ext.nsk;
+    let ovk = ext.ovk;
+    let dk = ext.dk;
 
     // ak = ask * G (Sapling SpendAuth basepoint)
-    // Use reddsa's SigningKey/VerificationKey which handles the basepoint correctly
-    let ask_bytes: [u8; 32] = ask.to_bytes();
+    // Use reddsa's SigningKey/VerificationKey which handles the basepoint correctly.
+    // No sign normalization — matches upstream sapling-crypto's FullViewingKey derivation.
+    let ask_bytes: [u8; 32] = ext.ask.to_bytes();
     let sk: reddsa::SigningKey<SaplingSpendAuth> = match reddsa::SigningKey::try_from(ask_bytes) {
         Ok(k) => k,
         Err(_) => return ZsigError::InvalidKey,
     };
-
-    // Get ak from verification key, with normalization
-    let mut vk: reddsa::VerificationKey<SaplingSpendAuth> = (&sk).into();
-    let mut ak_bytes: [u8; 32] = vk.into();
-
-    // Normalize: if high bit of ak encoding is 1, negate ask and recompute
-    if (ak_bytes[31] >> 7) == 1 {
-        ask = -ask;
-        let ask_bytes_neg: [u8; 32] = ask.to_bytes();
-        let sk_neg: reddsa::SigningKey<SaplingSpendAuth> = match reddsa::SigningKey::try_from(ask_bytes_neg) {
-            Ok(k) => k,
-            Err(_) => return ZsigError::InvalidKey,
-        };
-        vk = (&sk_neg).into();
-        ak_bytes = vk.into();
-    }
+    let vk: reddsa::VerificationKey<SaplingSpendAuth> = (&sk).into();
+    let ak_bytes: [u8; 32] = vk.into();
 
     // nk = nsk * H (proof generation basepoint)
     let proof_basepoint = sapling_proof_gen_basepoint();
@@ -982,24 +920,9 @@ pub unsafe extern "C" fn zsig_derive_first_valid_diversifier_index(
 
     let seed_slice = slice::from_raw_parts(seed, seed_len);
 
-    // ZIP-32 Sapling master key derivation
-    let master = blake2b_personal(b"ZcashIP32Sapling", seed_slice);
-
-    let mut sk = [0u8; 32];
-    let mut chain_code = [0u8; 32];
-    sk.copy_from_slice(&master[..32]);
-    chain_code.copy_from_slice(&master[32..64]);
-
-    // Hardened child derivation: m/32'/coin_type'/account'
-    derive_sapling_child(&mut sk, &mut chain_code, 32 | 0x80000000);
-    derive_sapling_child(&mut sk, &mut chain_code, coin_type | 0x80000000);
-    derive_sapling_child(&mut sk, &mut chain_code, account | 0x80000000);
-
-    // Derive dk from sk
-    // dk = truncate_32(PRF^expand(sk, 0x10))
-    let dk_expanded = prf_expand(&sk, 0x10);
-    let mut dk = [0u8; 32];
-    dk.copy_from_slice(&dk_expanded[..32]);
+    // Use proper ZIP-32 Sapling CKDh with additive derivation
+    let ext = crate::keys::SaplingExtendedKey::from_seed_at_path(seed_slice, coin_type, account);
+    let dk = ext.dk;
 
     // Find first valid diversifier index
     let (index, diversifier) = find_first_valid_diversifier(&dk);

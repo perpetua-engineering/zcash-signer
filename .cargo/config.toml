@@ -25,7 +25,7 @@ rustflags = ["-C", "panic=abort"]
 [target.x86_64-apple-ios]
 rustflags = ["-C", "panic=abort"]
 
-[unstable]
-build-std = ["core", "alloc"]
-# Note: panic_immediate_abort is now a real panic strategy in newer nightlies
-# Set via [profile.release] panic = "abort" in Cargo.toml instead
+# [unstable]
+# build-std = ["core", "alloc"]
+# Note: build-std is handled explicitly by build-xcframework.sh for tier-3 targets.
+# Enabling it here globally breaks cargo test on the host (macOS).

@@ -69,5 +69,18 @@ let package = Package(
             ],
             path: "pczt-cli"
         ),
+        .target(
+            name: "WalletCoreStubSymbols",
+            path: "Tests/WalletCoreStubSymbols",
+            publicHeadersPath: "."
+        ),
+        .testTarget(
+            name: "ZcashSignerCoreTests",
+            dependencies: [
+                "ZcashSigner",
+                "WalletCoreStubSymbols"
+            ],
+            path: "Tests/ZcashSignerCoreTests"
+        ),
     ]
 )
