@@ -1,2 +1,3 @@
-// Secp256k1Stubs — weak callback stubs for libzcash_signer.a
-// No public API; symbols are resolved at link time.
+// Secp256k1Stubs.h — empty umbrella header.
+// The actual symbols are defined in secp256k1_stubs.c as weak no-ops.
+
