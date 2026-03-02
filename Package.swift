@@ -43,10 +43,18 @@ let package = Package(
             path: "vendor/ZcashSigner.xcframework"
         ),
 
+        // Weak secp256k1 callback stubs. libzcash_signer.a references these
+        // symbols; on the phone libzcashlc provides the real ones, but on the
+        // watch (no libzcashlc) these no-op weak stubs satisfy the linker.
+        .target(
+            name: "Secp256k1Stubs",
+            path: "Sources/Secp256k1Stubs"
+        ),
+
         // Swift wrapper providing safe, idiomatic API
         .target(
             name: "ZcashSignerCore",
-            dependencies: ["ZcashSigner"],
+            dependencies: ["ZcashSigner", "Secp256k1Stubs"],
             path: "Sources/ZcashSignerSwift"
         ),
 
