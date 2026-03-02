@@ -39,7 +39,7 @@ pub use transparent::*;
 // Global Allocator (required for no_std + alloc)
 // -----------------------------------------------------------------------------
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), not(test)))]
 mod allocator {
     use core::alloc::{GlobalAlloc, Layout};
 
@@ -66,17 +66,17 @@ mod allocator {
     }
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), not(test)))]
 #[global_allocator]
 static ALLOCATOR: allocator::LibcAllocator = allocator::LibcAllocator;
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), not(test)))]
 #[alloc_error_handler]
 fn alloc_error(_layout: core::alloc::Layout) -> ! {
     loop {}
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(not(feature = "std"), not(test)))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
@@ -254,5 +254,239 @@ pub extern "C" fn zsig_version() -> *const u8 {
 pub unsafe extern "C" fn zsig_free(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
         let _ = alloc::boxed::Box::from_raw(core::slice::from_raw_parts_mut(ptr, len));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use core::num::NonZeroU32;
+    use core::ptr;
+    use ff::PrimeField;
+    use pasta_curves::pallas::Scalar as PallasScalar;
+    use reddsa::orchard::SpendAuth as OrchardSpendAuth;
+    use std::sync::{Mutex, OnceLock};
+    use std::vec::Vec;
+
+    #[derive(Clone, Default)]
+    struct CallbackState {
+        bytes: Vec<u8>,
+        offset: usize,
+        call_count: usize,
+        fail_on_call: Option<usize>,
+        requested_lengths: Vec<usize>,
+    }
+
+    static CALLBACK_STATE: OnceLock<Mutex<CallbackState>> = OnceLock::new();
+    static TEST_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn callback_state() -> &'static Mutex<CallbackState> {
+        CALLBACK_STATE.get_or_init(|| Mutex::new(CallbackState::default()))
+    }
+
+    fn test_guard() -> &'static Mutex<()> {
+        TEST_GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    fn install_callback_state(bytes: Vec<u8>, fail_on_call: Option<usize>) {
+        let mut state = callback_state()
+            .lock()
+            .expect("callback test state mutex poisoned");
+        *state = CallbackState {
+            bytes,
+            offset: 0,
+            call_count: 0,
+            fail_on_call,
+            requested_lengths: Vec::new(),
+        };
+    }
+
+    fn snapshot_callback_state() -> CallbackState {
+        callback_state()
+            .lock()
+            .expect("callback test state mutex poisoned")
+            .clone()
+    }
+
+    unsafe extern "C" fn deterministic_callback(buffer: *mut u8, length: usize) -> i32 {
+        let mut state = callback_state()
+            .lock()
+            .expect("callback test state mutex poisoned");
+        state.call_count += 1;
+        state.requested_lengths.push(length);
+
+        if let Some(fail_on_call) = state.fail_on_call {
+            if state.call_count >= fail_on_call {
+                return -1;
+            }
+        }
+
+        if state.offset + length > state.bytes.len() {
+            return -2;
+        }
+
+        if length > 0 {
+            let src = &state.bytes[state.offset..state.offset + length];
+            ptr::copy_nonoverlapping(src.as_ptr(), buffer, length);
+        }
+        state.offset += length;
+        0
+    }
+
+    struct DeterministicRng {
+        bytes: Vec<u8>,
+        offset: usize,
+    }
+
+    impl DeterministicRng {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self { bytes, offset: 0 }
+        }
+
+        fn consumed(&self) -> usize {
+            self.offset
+        }
+    }
+
+    impl RngCore for DeterministicRng {
+        fn next_u32(&mut self) -> u32 {
+            let mut buf = [0u8; 4];
+            self.fill_bytes(&mut buf);
+            u32::from_le_bytes(buf)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut buf = [0u8; 8];
+            self.fill_bytes(&mut buf);
+            u64::from_le_bytes(buf)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            let end = self.offset + dest.len();
+            dest.copy_from_slice(&self.bytes[self.offset..end]);
+            self.offset = end;
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            let end = self.offset + dest.len();
+            if end > self.bytes.len() {
+                return Err(rand_core::Error::from(NonZeroU32::new(2).unwrap()));
+            }
+            dest.copy_from_slice(&self.bytes[self.offset..end]);
+            self.offset = end;
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for DeterministicRng {}
+
+    fn canonical_ask(value: u64) -> [u8; 32] {
+        PallasScalar::from(value).to_repr().into()
+    }
+
+    fn deterministic_stream(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|index| (((index * 37) + 11) & 0xff) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn callback_rng_preserves_byte_order_and_requested_length() {
+        let _guard = test_guard().lock().expect("test guard mutex poisoned");
+        let stream = deterministic_stream(128);
+        install_callback_state(stream.clone(), None);
+
+        let mut rng = CallbackRng::new(deterministic_callback);
+        let mut out = [0u8; 37];
+        rng.fill_bytes(&mut out);
+
+        assert_eq!(out.as_slice(), &stream[..37]);
+        assert!(!rng.has_failed());
+
+        let state = snapshot_callback_state();
+        assert_eq!(state.call_count, 1);
+        assert_eq!(state.requested_lengths.as_slice(), &[37]);
+        assert_eq!(state.offset, 37);
+    }
+
+    #[test]
+    fn callback_rng_failure_sets_flag_and_returns_error() {
+        let _guard = test_guard().lock().expect("test guard mutex poisoned");
+        install_callback_state(deterministic_stream(64), Some(1));
+
+        let mut rng = CallbackRng::new(deterministic_callback);
+        let mut out = [0u8; 16];
+
+        assert!(rng.try_fill_bytes(&mut out).is_err());
+        assert!(rng.has_failed());
+
+        let state = snapshot_callback_state();
+        assert_eq!(state.call_count, 1);
+        assert_eq!(state.requested_lengths.as_slice(), &[16]);
+    }
+
+    #[test]
+    fn orchard_signature_matches_callback_rng_cross_check_vector() {
+        const KNOWN_GOOD_SIGNATURE_HEX: &str =
+            "39ac9bc738af5c0701edbeed4d64af9dc73ec20d973546166776bec993535212\
+             270de742c06f8023c1c25d0f2bab1cf1ed47a054b653e128e8feac17acc43308";
+
+        let _guard = test_guard().lock().expect("test guard mutex poisoned");
+        let ask_bytes = canonical_ask(42);
+        let ask = ZsigOrchardAsk { bytes: ask_bytes };
+        let message = b"callback-rng-cross-check-vector";
+        let stream = deterministic_stream(512);
+        install_callback_state(stream.clone(), None);
+
+        let mut signature_out = ZsigOrchardSignature { bytes: [0u8; 64] };
+        let ffi_result = unsafe {
+            zsig_sign_orchard(
+                &ask,
+                message.as_ptr(),
+                message.len(),
+                &mut signature_out,
+                deterministic_callback,
+            )
+        };
+        assert_eq!(ffi_result, ZsigError::Success);
+
+        let signing_key: reddsa::SigningKey<OrchardSpendAuth> =
+            reddsa::SigningKey::try_from(ask_bytes).expect("canonical ask must create signing key");
+        let mut deterministic_rng = DeterministicRng::new(stream);
+        let expected_sig: reddsa::Signature<OrchardSpendAuth> =
+            signing_key.sign(&mut deterministic_rng, message);
+        let expected_bytes: [u8; 64] = expected_sig.into();
+
+        assert_eq!(signature_out.bytes, expected_bytes);
+        assert_eq!(hex::encode(signature_out.bytes), KNOWN_GOOD_SIGNATURE_HEX);
+
+        let state = snapshot_callback_state();
+        assert_eq!(state.offset, deterministic_rng.consumed());
+    }
+
+    #[test]
+    fn orchard_sign_returns_rng_failed_when_callback_errors() {
+        let _guard = test_guard().lock().expect("test guard mutex poisoned");
+        let ask = ZsigOrchardAsk {
+            bytes: canonical_ask(7),
+        };
+        let message = [0xAB; 32];
+        let mut signature_out = ZsigOrchardSignature { bytes: [0u8; 64] };
+
+        install_callback_state(deterministic_stream(64), Some(1));
+
+        let result = unsafe {
+            zsig_sign_orchard(
+                &ask,
+                message.as_ptr(),
+                message.len(),
+                &mut signature_out,
+                deterministic_callback,
+            )
+        };
+
+        assert_eq!(result, ZsigError::RngFailed);
     }
 }
