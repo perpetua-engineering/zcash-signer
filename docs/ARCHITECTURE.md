@@ -44,6 +44,7 @@ The build script (`build-xcframework.sh`) compiles `core` and `alloc` from sourc
 cargo +nightly build \
     -Z build-std=core,alloc \
     --target aarch64-apple-watchos \
+    --features pczt-signer,secure-signer \
     --release
 ```
 
