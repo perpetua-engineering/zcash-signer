@@ -29,21 +29,22 @@ swift build --product pczt-cli
 |---------|-------------|
 | `init` | Initialize wallet from seed, derive keys, save config |
 | `sync` | Sync wallet with the blockchain |
+| `address` | Derive and display addresses |
 | `propose` | Create a shielding or transfer proposal → base PCZT |
-| `extract-sighashes` | Extract sighashes from PCZT for signing |
-| `sign` | Sign sighashes with ASK (Orchard/Sapling) and seed (transparent) |
-| `apply-signatures` | Apply signatures to PCZT |
+| `sign` | Sign a PCZT binary (derives keys from seed, signs all pools) |
 | `prove` | Add zk-SNARK proofs to PCZT |
 | `broadcast` | Submit proven+signed PCZT to network (fork-merge flow) |
 | `send` | Complete and broadcast signed PCZT (sequential flow) |
 | `inspect` | Show PCZT summary and state |
 | `test-ufvk` | Validate Rust UFVK derivation against SDK |
+| `compare-address` | Compare address derivation against SDK |
 
 ## Workflow Patterns
 
 ### Sequential Flow (Recommended)
 
-Sign first, then prove. Avoids `OrchardBindingSigMismatch` errors.
+Sign first, then prove and broadcast in one step. The `sign` command derives all keys
+from `ZCASH_SEED` and signs the PCZT directly — no sighash extraction needed.
 
 ```bash
 # 1. Initialize and sync
@@ -54,39 +55,28 @@ pczt-cli sync
 # 2. Create proposal (base PCZT)
 pczt-cli propose shield 100000
 
-# 3. Extract sighashes from BASE PCZT
-pczt-cli extract-sighashes ~/.pczt-cli/pczts/pczt_XXXX.bin > sighashes.json
+# 3. Sign PCZT (derives keys from seed, signs all pools)
+pczt-cli sign ~/.pczt-cli/pczts/pczt_XXXX.bin
 
-# 4. Sign (on watch/secure device)
-pczt-cli sign <ASK_HEX> sighashes.json > signatures.json
-
-# 5. Apply signatures to BASE PCZT
-pczt-cli apply-signatures ~/.pczt-cli/pczts/pczt_XXXX.bin signatures.json
-
-# 6. Add proofs and broadcast (sequential)
+# 4. Add proofs and broadcast
 pczt-cli send ~/.pczt-cli/pczts/pczt_XXXX_signed.bin
 ```
 
-### Fork-Merge Flow (Problematic)
+### Fork-Merge Flow
 
-Prove first, then sign. Can cause `OrchardBindingSigMismatch` if not careful.
+Prove and sign independently, then merge at broadcast. Can cause
+`OrchardBindingSigMismatch` if PCZTs diverge — prefer sequential flow.
 
 ```bash
 # 1-2. Same as above
 
-# 3. Add proofs to base PCZT
+# 3. Sign the base PCZT
+pczt-cli sign ~/.pczt-cli/pczts/pczt_XXXX.bin
+
+# 4. Prove the base PCZT (separate copy)
 pczt-cli prove ~/.pczt-cli/pczts/pczt_XXXX.bin
 
-# 4. Extract sighashes from PROVEN PCZT (important!)
-pczt-cli extract-sighashes ~/.pczt-cli/pczts/pczt_XXXX_proven.bin > sighashes.json
-
-# 5. Sign
-pczt-cli sign <ASK_HEX> sighashes.json > signatures.json
-
-# 6. Apply signatures to PROVEN PCZT (same one used for sighashes!)
-pczt-cli apply-signatures ~/.pczt-cli/pczts/pczt_XXXX_proven.bin signatures.json
-
-# 7. Broadcast with both PCZTs
+# 5. Broadcast with both
 pczt-cli broadcast ~/.pczt-cli/pczts/pczt_XXXX_proven.bin ~/.pczt-cli/pczts/pczt_XXXX_signed.bin
 ```
 
@@ -96,18 +86,11 @@ This error occurs when:
 1. Proofs and signatures are generated from different PCZT states
 2. The binding signature (bsk) doesn't match the value commitments
 
-**Root cause**: The Prover modifies PCZT state when adding proofs. If you:
-- Fork the PCZT into two copies
-- Add proofs to copy A
-- Sign copy B
-- Try to merge A + B
+**Root cause**: The Prover modifies PCZT state when adding proofs. If you fork the PCZT
+into two copies and modify them independently, they diverge and cannot be merged.
 
-The binding signature won't match because A and B diverged.
-
-**Solution**: Use the sequential flow (`send` command) which:
-1. Applies signatures to the base PCZT
-2. Adds proofs to the signed PCZT
-3. Extracts and broadcasts from a single consistent PCZT
+**Solution**: Use the sequential flow (`send` command) which applies signatures, then
+proofs, then broadcasts from a single consistent PCZT.
 
 ## Diagnostic Mode
 
@@ -123,47 +106,6 @@ This will show:
 - Orchard randomizer comparison
 - Transparent sighash comparison
 - Attempt sequential extraction as a test
-
-## Data Directory
-
-All state is stored in `~/.pczt-cli/`:
-
-```
-~/.pczt-cli/
-├── config.json          # Wallet configuration
-├── data/                # SDK databases
-│   └── mainnet/
-├── proposals/           # Serialized proposals (if needed)
-└── pczts/               # PCZT binary files
-```
-
-## Example: Full Shielding Flow
-
-```bash
-# Setup
-export ZCASH_SEED="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
-pczt-cli init
-pczt-cli sync
-
-# Create shielding proposal (shield all transparent with threshold 100000 zatoshi)
-pczt-cli propose shield 100000
-# Output: pczt_file: ~/.pczt-cli/pczts/pczt_abc123.bin
-
-# Extract sighashes
-pczt-cli extract-sighashes ~/.pczt-cli/pczts/pczt_abc123.bin 2>/dev/null > /tmp/sighashes.json
-
-# Get ASK from init output, or:
-# pczt-cli init 2>&1 | grep "Orchard ASK"
-
-# Sign with ASK
-pczt-cli sign e3f28a6fe609a23c85f7260964633802884621b764bd39e581124eaac63b7b12 /tmp/sighashes.json 2>/dev/null > /tmp/signatures.json
-
-# Apply signatures
-pczt-cli apply-signatures ~/.pczt-cli/pczts/pczt_abc123.bin /tmp/signatures.json
-
-# Complete and broadcast (adds proofs + sends)
-pczt-cli send ~/.pczt-cli/pczts/pczt_abc123_signed.bin
-```
 
 ## Inspecting PCZTs
 
@@ -190,15 +132,6 @@ This command:
 2. Derives a UFVK using the Rust library (Transparent + Sapling + Orchard)
 3. Validates the Rust UFVK using the SDK's `isValidUnifiedFullViewingKey`
 4. Derives a unified address from the Rust UFVK to confirm it's usable
-
-Expected output:
-```
-[Test] isValidUnifiedFullViewingKey: true
-[Test] Derived UA from Rust UFVK: u1...
-[Test] SUCCESS: Rust UFVK validated by SDK!
-```
-
-The UFVKs may differ in string encoding (receiver ordering, etc.) but both should be valid and derive the same addresses.
 
 ## License
 

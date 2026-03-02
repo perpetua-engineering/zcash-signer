@@ -214,6 +214,9 @@ For direct C/Objective-C usage:
 
 ## Architecture Notes
 
+For a deep dive on the `no_std` design, allocator, RNG bridge, vendor patches, and
+build pipeline, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ### Why This Exists
 
 The upstream `orchard` and `sapling-crypto` crates' ZIP-32 key derivation requires `std`, which isn't available on watchOS (tier-3 target). This crate implements the same algorithms using `no_std`-compatible primitives:
@@ -273,10 +276,23 @@ The `vendor/` directory contains patched versions of:
 ## Testing
 
 ```bash
-# Run on macOS (uses macos-universal library)
+# Swift wrapper tests (uses macos-universal library)
 cd /path/to/zcash-signer
 swift test
+
+# Rust cross-check tests (validate against upstream crates)
+cargo test --features debug-tools
 ```
+
+The Rust test suite (`tests/`) cross-checks our `no_std` implementations against the
+upstream `orchard`, `sapling-crypto`, and `zcash_transparent` crates:
+
+| Test module | What it validates |
+|-------------|-------------------|
+| `orchard_derivation` | ZIP-32 Orchard spending key, ask, ak derivation |
+| `sapling_derivation` | ZIP-32 Sapling spending key, ask, ak, FVK derivation |
+| `address_derivation` | BIP-44 transparent addresses, diversifier indices, Orchard addresses |
+| `ufvk_encoding` | ZIP-316 UFVK encoding (F4Jumble + Bech32m) against reference |
 
 ## Security
 
