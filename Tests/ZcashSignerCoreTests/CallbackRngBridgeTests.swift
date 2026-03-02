@@ -3,8 +3,8 @@ import Security
 import XCTest
 import ZcashSigner
 
-private func secRandomCallback(_ buffer: UnsafeMutablePointer<UInt8>?, _ length: Int) -> Int32 {
-    guard let buffer else { return -1 }
+private let secRandomCallback: @convention(c) (UnsafeMutablePointer<UInt8>?, Int) -> Int32 = { buffer, length in
+    guard let buffer = buffer else { return -1 }
     return SecRandomCopyBytes(kSecRandomDefault, length, buffer)
 }
 
@@ -41,14 +41,14 @@ final class CallbackRngBridgeTests: XCTestCase {
         let deriveAkResult = zsig_derive_ak_from_ask(&ask, &ak)
         XCTAssertEqual(deriveAkResult.rawValue, 0)
 
-        let verifyResult = verifyOrchard(ak: ak, message: message, signature: &signatureFFI)
+        let verifyResult = verifyOrchard(ak: ak, message: message, signature: signatureFFI)
         XCTAssertEqual(verifyResult.rawValue, 0)
     }
 
     private func verifyOrchard(
         ak: [UInt8],
         message: [UInt8],
-        signature: inout ZsigOrchardSignature
+        signature: ZsigOrchardSignature
     ) -> ZsigError {
         var signatureFFI = ZsigOrchardSignature()
         signatureFFI = signature
