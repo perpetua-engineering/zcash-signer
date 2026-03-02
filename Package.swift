@@ -43,10 +43,19 @@ let package = Package(
             path: "vendor/ZcashSigner.xcframework"
         ),
 
+        // Weak secp256k1 C FFI callback stubs needed by libzcash_signer.a
+        // when built with pczt-signer feature. Weak so real implementations
+        // (e.g. from libzcashlc) win when both are linked.
+        .target(
+            name: "Secp256k1Stubs",
+            path: "Sources/Secp256k1Stubs",
+            publicHeadersPath: "include"
+        ),
+
         // Swift wrapper providing safe, idiomatic API
         .target(
             name: "ZcashSignerCore",
-            dependencies: ["ZcashSigner"],
+            dependencies: ["ZcashSigner", "Secp256k1Stubs"],
             path: "Sources/ZcashSignerSwift"
         ),
 
