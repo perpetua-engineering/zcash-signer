@@ -91,6 +91,37 @@ build_tier2 "aarch64-apple-darwin" "macOS (arm64)"
 build_tier2 "x86_64-apple-darwin" "macOS (x86_64)"
 
 echo ""
+echo "==> Localizing duplicate secp256k1 C FFI symbols..."
+# libzcash_signer.a and libzcashlc (Zcash SDK) both bundle identical secp256k1
+# C FFI symbols (context_create, context_destroy, default_*_callback_fn).
+# When both are linked into pczt-cli, the linker rejects the duplicates.
+# Use nmedit to make our copies non-global so the linker ignores them.
+SECP_SYMS=$(mktemp)
+cat > "$SECP_SYMS" << 'SYMS'
+_rustsecp256k1_v0_10_0_context_create
+_rustsecp256k1_v0_10_0_context_destroy
+_rustsecp256k1_v0_10_0_default_error_callback_fn
+_rustsecp256k1_v0_10_0_default_illegal_callback_fn
+SYMS
+
+for target_dir in \
+    "$BUILD_DIR/aarch64-apple-watchos/release" \
+    "$BUILD_DIR/arm64_32-apple-watchos/release" \
+    "$BUILD_DIR/aarch64-apple-watchos-sim/release" \
+    "$BUILD_DIR/x86_64-apple-watchos-sim/release" \
+    "$BUILD_DIR/aarch64-apple-ios/release" \
+    "$BUILD_DIR/aarch64-apple-ios-sim/release" \
+    "$BUILD_DIR/x86_64-apple-ios/release" \
+    "$BUILD_DIR/aarch64-apple-darwin/release" \
+    "$BUILD_DIR/x86_64-apple-darwin/release"; do
+    lib="$target_dir/libzcash_signer.a"
+    if [ -f "$lib" ]; then
+        nmedit -R "$SECP_SYMS" "$lib" 2>/dev/null && echo "  $(basename "$target_dir"): OK" || echo "  $(basename "$target_dir"): skipped (symbols not found)"
+    fi
+done
+rm -f "$SECP_SYMS"
+
+echo ""
 echo "==> Creating universal libraries with lipo..."
 
 # Create output directories

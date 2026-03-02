@@ -50,11 +50,20 @@ let package = Package(
             path: "Sources/ZcashSignerSwift"
         ),
 
+        // Stub implementations of WalletCore C FFI symbols referenced by
+        // secure-signer in libzcash_signer.a. Only needed by the CLI —
+        // the real app links WalletCore.xcframework which provides these.
+        .target(
+            name: "WalletCoreStubs",
+            path: "Sources/WalletCoreStubs"
+        ),
+
         // PCZT CLI tool for testing phone+watch signing flow
         .executableTarget(
             name: "pczt-cli",
             dependencies: [
                 "ZcashSignerCore",
+                "WalletCoreStubs",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "ZcashLightClientKit", package: "zcash-swift-wallet-sdk"),
             ],
