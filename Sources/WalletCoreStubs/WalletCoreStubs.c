@@ -17,3 +17,8 @@ void *TWStringCreateWithUTF8Bytes(const char *str) { (void)str; return NULL; }
 void TWStringDelete(void *str) { (void)str; }
 void *TWSecureSignerDeriveSeed(const void *mnemonic, const void *key_ref, const void *salt) { (void)mnemonic; (void)key_ref; (void)salt; return NULL; }
 void TWSecureSignerFreeSeed(void *seed) { (void)seed; }
+
+// secp256k1 C FFI callback stubs. Weak so libzcashlc's real definitions win
+// when both are linked (test target). Only used when libzcashlc is absent.
+__attribute__((weak)) void rustsecp256k1_v0_10_0_default_error_callback_fn(const char *msg, void *data) { (void)msg; (void)data; }
+__attribute__((weak)) void rustsecp256k1_v0_10_0_default_illegal_callback_fn(const char *msg, void *data) { (void)msg; (void)data; }

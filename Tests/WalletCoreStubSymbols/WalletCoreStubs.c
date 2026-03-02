@@ -47,3 +47,24 @@ TWData *TWSecureSignerDeriveSeed(
 void TWSecureSignerFreeSeed(TWData *seed) {
     (void)seed;
 }
+
+/* secp256k1 C FFI callback stubs.
+   libzcash_signer.a's secp256k1 C source references these as undefined
+   symbols. In the real app they're provided by the secp256k1_sys Rust
+   object, but nmedit localises those definitions to avoid duplicate-symbol
+   errors with libzcashlc. Provide fallback definitions here. */
+
+/* Weak so libzcashlc's real definitions win when both are linked. */
+__attribute__((weak))
+void rustsecp256k1_v0_10_0_default_error_callback_fn(
+    const char *msg, void *data) {
+    (void)msg;
+    (void)data;
+}
+
+__attribute__((weak))
+void rustsecp256k1_v0_10_0_default_illegal_callback_fn(
+    const char *msg, void *data) {
+    (void)msg;
+    (void)data;
+}
