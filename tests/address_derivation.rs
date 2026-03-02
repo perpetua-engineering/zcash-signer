@@ -4,7 +4,7 @@
 //! - Orchard IVK derivation (Sinsemilla commit_ivk) by comparing pk_d for a given diversifier
 //! - Orchard payment address components against upstream orchard crate
 //! - Sapling diversifier key (dk) against upstream sapling-crypto
-//! - Sapling diversifier derivation (FF1-AES256) against upstream (known discrepancy)
+//! - Sapling diversifier derivation (FF1-AES256) against upstream
 //!
 //! Requires the `debug-tools` feature: cargo test --features debug-tools
 
@@ -405,56 +405,31 @@ fn sapling_fvk_components_match_upstream() {
 }
 
 /// Cross-check Sapling diversifier derivation (FF1-AES256) against upstream.
-///
-/// KNOWN ISSUE: Our FF1-AES256 implementation produces different diversifiers than
-/// upstream sapling-crypto, despite using the same dk. This means our Sapling
-/// addresses will not match the SDK's addresses.
-///
-/// This test documents the discrepancy by comparing both sides and asserting they
-/// differ (so it will fail-to-compile if someone fixes FF1 without updating the test).
-///
-/// See CR-749 for the FF1-AES256 fix ticket.
 #[test]
-fn sapling_diversifier_known_discrepancy() {
-    // Use the first test vector to document the discrepancy
-    let (seed, coin_type, account) = &test_vectors()[0];
+fn sapling_diversifier_matches_upstream() {
+    for (i, (seed, coin_type, account)) in test_vectors().iter().enumerate() {
+        let (our_index, our_diversifier) =
+            our_first_valid_diversifier(seed, *coin_type, *account);
 
-    // Our diversifier derivation
-    let (our_index, our_diversifier) =
-        our_first_valid_diversifier(seed, *coin_type, *account);
+        let dfvk = upstream_sapling_dfvk(seed, *coin_type, *account);
+        let (upstream_di, upstream_addr) = dfvk.default_address();
+        let upstream_diversifier = upstream_addr.diversifier().0;
 
-    // Upstream diversifier derivation
-    let dfvk = upstream_sapling_dfvk(seed, *coin_type, *account);
-    let (upstream_di, upstream_addr) = dfvk.default_address();
-    let upstream_diversifier = upstream_addr.diversifier().0;
+        // DiversifierIndex is little-endian and 11 bytes wide; our FFI currently
+        // returns the first 64 bits as u64, so compare on that shared range.
+        let upstream_index_bytes = upstream_di.as_bytes();
+        let mut upstream_index_u64 = 0u64;
+        for (j, &b) in upstream_index_bytes.iter().enumerate().take(8) {
+            upstream_index_u64 |= (b as u64) << (j * 8);
+        }
 
-    // Convert upstream index to u64 for comparison
-    let upstream_index_bytes = upstream_di.as_bytes();
-    let mut upstream_index_u64 = 0u64;
-    for (j, &b) in upstream_index_bytes.iter().enumerate().take(8) {
-        upstream_index_u64 |= (b as u64) << (j * 8);
-    }
-
-    // Document the discrepancy: dk matches (tested above) but FF1 output differs
-    // When this assertion starts failing, it means FF1 was fixed — update the test!
-    if our_diversifier == upstream_diversifier {
-        // FF1 is now fixed! Update this test to assert equality across all vectors.
-        panic!(
-            "FF1-AES256 now matches upstream — update sapling_diversifier_known_discrepancy \
-             test to assert equality and remove the known-discrepancy documentation"
+        assert_eq!(
+            our_index, upstream_index_u64,
+            "Sapling diversifier index mismatch for vector {i} (coin_type={coin_type}, account={account})"
+        );
+        assert_eq!(
+            our_diversifier, upstream_diversifier,
+            "Sapling diversifier mismatch for vector {i} (coin_type={coin_type}, account={account})"
         );
     }
-
-    // Log the discrepancy for visibility
-    eprintln!(
-        "KNOWN: Sapling FF1-AES256 discrepancy: our index={our_index}, upstream index={upstream_index_u64}"
-    );
-    eprintln!(
-        "  our diversifier:      {}",
-        hex::encode(our_diversifier)
-    );
-    eprintln!(
-        "  upstream diversifier: {}",
-        hex::encode(upstream_diversifier)
-    );
 }

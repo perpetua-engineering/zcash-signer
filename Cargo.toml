@@ -38,6 +38,7 @@ ripemd = { version = "0.1", default-features = false }
 
 # AES for FF1-AES diversifier derivation (ZIP-32)
 aes = { version = "0.8", default-features = false }
+fpe = { version = "0.6.1", default-features = false, features = ["alloc"] }
 
 # BLAKE2s for Sapling DiversifyHash (with personalization support)
 blake2s_simd = { version = "1.0", default-features = false }
