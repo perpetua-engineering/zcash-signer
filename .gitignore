@@ -27,3 +27,6 @@ vendor/ZcashSigner.xcframework/
 
 # Build artifacts
 build/
+
+# Config.plist symlink (created by xcodebuild wrapper, points outside repo)
+Config.plist
