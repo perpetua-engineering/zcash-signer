@@ -65,6 +65,9 @@ secp256k1 = { version = "0.29", default-features = false, features = ["alloc"], 
 [dev-dependencies]
 # For validation against reference implementations
 hex = "0.4"
+# For UFVK encoding cross-checks (ZIP-316 F4Jumble + Bech32m)
+f4jumble = "0.1"
+bech32 = "0.11"
 
 [[bin]]
 name = "verify_rk"
