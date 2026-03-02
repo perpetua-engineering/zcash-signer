@@ -50,21 +50,32 @@ actor WalletManager {
 
         let synchronizer = SDKSynchronizer(initializer: initializer)
 
-        let ufvkKey = try UnifiedFullViewingKey(encoding: ufvk, network: self.network.networkType)
-        _ = try await synchronizer.prepareViewOnly(
-            ufvk: ufvkKey,
+        _ = try await synchronizer.prepare(
+            with: nil,
             walletBirthday: BlockHeight(Int(birthday)),
+            for: .newWallet,
             name: "pczt-cli",
             keySource: "local"
         )
 
-        let accounts = try await synchronizer.listAccounts()
-        guard let account = accounts.first else {
-            throw WalletManagerError.notInitialized("No accounts found after prepareViewOnly")
+        // Check if account already exists from a previous run
+        let existingAccounts = try await synchronizer.listAccounts()
+        let accountUUID: AccountUUID
+        if let existing = existingAccounts.first {
+            accountUUID = existing.id
+        } else {
+            accountUUID = try await synchronizer.importAccount(
+                ufvk: ufvk,
+                seedFingerprint: nil,
+                zip32AccountIndex: nil,
+                purpose: .viewOnly,
+                name: "pczt-cli",
+                keySource: "local"
+            )
         }
 
         self.synchronizer = synchronizer
-        self.accountUUID = account.id
+        self.accountUUID = accountUUID
     }
 
     // MARK: - Sync
@@ -129,41 +140,8 @@ actor WalletManager {
         try await synchronizer.createPCZTFromProposal(accountUUID: accountUUID, proposal: proposal)
     }
 
-    func extractSighashes(from pczt: Data) async throws -> PCZTSighashes {
-        try await synchronizer.extractSighashesFromPCZT(pczt)
-    }
-
-    func applySignatures(to pczt: Data, signatures: PCZTSignatures) async throws -> Data {
-        try await synchronizer.applySignaturesToPCZT(pczt, signatures: signatures)
-    }
-
     func addProofs(to pczt: Data) async throws -> Data {
         try await synchronizer.addProofsToPCZT(pczt: pczt)
-    }
-
-    func pcztSummary(_ pczt: Data) async throws -> String {
-        try await synchronizer.pcztSummary(pczt)
-    }
-
-    /// Send a signed PCZT using the sequential flow (add proofs, then broadcast).
-    /// This avoids the fork-and-merge pattern that can cause OrchardBindingSigMismatch.
-    func sendFromSignedPCZT(_ signedPCZT: Data) async throws -> String {
-        let results = try await synchronizer.sendFromSignedPCZT(signedPCZT)
-
-        for try await result in results {
-            switch result {
-            case .success(let txId):
-                return txId.hexString
-            case .grpcFailure(_, let error):
-                throw WalletManagerError.broadcastFailed(error.localizedDescription)
-            case .submitFailure(_, let code, let description):
-                throw WalletManagerError.broadcastFailed("\(code): \(description)")
-            case .notAttempted:
-                continue
-            }
-        }
-
-        throw WalletManagerError.broadcastFailed("No transaction submitted")
     }
 
     func broadcast(pcztWithProofs: Data, pcztWithSigs: Data) async throws -> String {
@@ -186,19 +164,6 @@ actor WalletManager {
         }
 
         throw WalletManagerError.broadcastFailed("No transaction submitted")
-    }
-
-    func debugExtractTxFromPCZT(pcztWithProofs: Data, pcztWithSigs: Data) async throws -> String {
-        let txId = try await synchronizer.debugExtractTxFromPCZT(
-            pcztWithProofs: pcztWithProofs,
-            pcztWithSigs: pcztWithSigs
-        )
-        return txId.hexString
-    }
-
-    func debugExtractTxFromSignedAndProvenPCZT(_ pczt: Data) async throws -> String {
-        let txId = try await synchronizer.debugExtractTxFromSignedAndProvenPCZT(pczt)
-        return txId.hexString
     }
 
     // MARK: - Addresses

@@ -8,6 +8,7 @@
 import ArgumentParser
 import Foundation
 import ZcashLightClientKit
+import ZcashSignerCore
 
 struct BroadcastCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -24,7 +25,7 @@ struct BroadcastCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Lightwalletd server URL")
     var lightwalletd: String?
 
-    @Flag(name: .long, help: "On failure, compare PCZT summaries and extracted sighashes")
+    @Flag(name: .long, help: "On failure, compare PCZT info between proven and signed")
     var diagnose: Bool = false
 
     @Flag(name: .long, help: "Verbose output")
@@ -66,68 +67,28 @@ struct BroadcastCommand: AsyncParsableCommand {
             await wallet.stop()
         } catch {
             if diagnose {
-                await diagnoseMismatch(provenPczt: provenPczt, signedPczt: signedPczt, wallet: wallet)
+                diagnoseMismatch(provenPczt: provenPczt, signedPczt: signedPczt)
             }
             await wallet.stop()
             throw error
         }
     }
 
-    private func diagnoseMismatch(
-        provenPczt: Data,
-        signedPczt: Data,
-        wallet: WalletManager
-    ) async {
-        errorOutput("[Broadcast][Diagnose] Comparing PCZT summaries...")
+    private func diagnoseMismatch(provenPczt: Data, signedPczt: Data) {
+        errorOutput("[Broadcast][Diagnose] Comparing PCZT info...")
         do {
-            let provenSummary = try await wallet.pcztSummary(provenPczt)
-            let signedSummary = try await wallet.pcztSummary(signedPczt)
-            errorOutput("[Broadcast][Diagnose] Proven summary: \(provenSummary)")
-            errorOutput("[Broadcast][Diagnose] Signed summary: \(signedSummary)")
+            let provenInfo = try pcztInfo(pcztData: provenPczt)
+            let signedInfo = try pcztInfo(pcztData: signedPczt)
+            errorOutput("[Broadcast][Diagnose] Proven:  orchard=\(provenInfo.orchardActions) sapling=\(provenInfo.saplingSpends) transparent_in=\(provenInfo.transparentInputs) transparent_out=\(provenInfo.transparentOutputs)")
+            errorOutput("[Broadcast][Diagnose] Signed:  orchard=\(signedInfo.orchardActions) sapling=\(signedInfo.saplingSpends) transparent_in=\(signedInfo.transparentInputs) transparent_out=\(signedInfo.transparentOutputs)")
+
+            let match = provenInfo.orchardActions == signedInfo.orchardActions
+                && provenInfo.saplingSpends == signedInfo.saplingSpends
+                && provenInfo.transparentInputs == signedInfo.transparentInputs
+                && provenInfo.transparentOutputs == signedInfo.transparentOutputs
+            errorOutput("[Broadcast][Diagnose] Structure match: \(match)")
         } catch {
-            errorOutput("[Broadcast][Diagnose] Failed to get PCZT summaries: \(error)")
-        }
-
-        errorOutput("[Broadcast][Diagnose] Comparing extracted sighashes...")
-        do {
-            let provenSighashes = try await wallet.extractSighashes(from: provenPczt)
-            let signedSighashes = try await wallet.extractSighashes(from: signedPczt)
-
-            let sameShielded = provenSighashes.shieldedSighash == signedSighashes.shieldedSighash
-            errorOutput("[Broadcast][Diagnose] Shielded sighash match: \(sameShielded)")
-            errorOutput("[Broadcast][Diagnose] Proven shielded sighash: \(provenSighashes.shieldedSighash.hexString)")
-            errorOutput("[Broadcast][Diagnose] Signed shielded sighash: \(signedSighashes.shieldedSighash.hexString)")
-
-            let provenOrchard = provenSighashes.orchardSpends.map { ($0.index, $0.randomizer.hexString) }
-            let signedOrchard = signedSighashes.orchardSpends.map { ($0.index, $0.randomizer.hexString) }
-            errorOutput("[Broadcast][Diagnose] Orchard randomizers (proven): \(provenOrchard)")
-            errorOutput("[Broadcast][Diagnose] Orchard randomizers (signed): \(signedOrchard)")
-
-            let provenTransparent = provenSighashes.transparentInputs.map { ($0.index, $0.sighash.hexString) }
-            let signedTransparent = signedSighashes.transparentInputs.map { ($0.index, $0.sighash.hexString) }
-            errorOutput("[Broadcast][Diagnose] Transparent sighashes (proven): \(provenTransparent)")
-            errorOutput("[Broadcast][Diagnose] Transparent sighashes (signed): \(signedTransparent)")
-        } catch {
-            errorOutput("[Broadcast][Diagnose] Failed to extract sighashes: \(error)")
-        }
-
-        errorOutput("[Broadcast][Diagnose] Attempting local extract variants (no broadcast)...")
-        do {
-            let txid = try await wallet.debugExtractTxFromPCZT(
-                pcztWithProofs: provenPczt,
-                pcztWithSigs: signedPczt
-            )
-            errorOutput("[Broadcast][Diagnose] Extract from split PCZTs succeeded: \(txid)")
-        } catch {
-            errorOutput("[Broadcast][Diagnose] Extract from split PCZTs failed: \(error)")
-        }
-
-        do {
-            let pcztWithProofsFromSigned = try await wallet.addProofs(to: signedPczt)
-            let txid = try await wallet.debugExtractTxFromSignedAndProvenPCZT(pcztWithProofsFromSigned)
-            errorOutput("[Broadcast][Diagnose] Extract from sequential (signed→prove) PCZT succeeded: \(txid)")
-        } catch {
-            errorOutput("[Broadcast][Diagnose] Extract from sequential (signed→prove) PCZT failed: \(error)")
+            errorOutput("[Broadcast][Diagnose] Failed to parse PCZT info: \(error)")
         }
     }
 

@@ -3,7 +3,7 @@
 //  pczt-cli
 //
 //  Complete and broadcast a signed PCZT using the sequential flow.
-//  This adds proofs to the signed PCZT, then extracts and broadcasts.
+//  This adds proofs to the signed PCZT, then broadcasts via createTransactionFromPCZT.
 //
 
 import ArgumentParser
@@ -32,8 +32,6 @@ struct SendCommand: AsyncParsableCommand {
         let signedPczt = try StateManager.shared.loadPCZT(path: signedPcztFile)
         errorOutput("[Send] Signed PCZT size: \(signedPczt.count) bytes")
 
-        errorOutput("[Send] Adding proofs and broadcasting (sequential flow)...")
-
         let wallet = try await WalletManager(
             ufvk: config.ufvk,
             birthday: config.birthday,
@@ -42,7 +40,12 @@ struct SendCommand: AsyncParsableCommand {
             verbose: verbose
         )
 
-        let txid = try await wallet.sendFromSignedPCZT(signedPczt)
+        errorOutput("[Send] Adding proofs to signed PCZT...")
+        let provenPczt = try await wallet.addProofs(to: signedPczt)
+        errorOutput("[Send] Proven PCZT size: \(provenPczt.count) bytes")
+
+        errorOutput("[Send] Broadcasting transaction...")
+        let txid = try await wallet.broadcast(pcztWithProofs: provenPczt, pcztWithSigs: signedPczt)
 
         await wallet.stop()
 
