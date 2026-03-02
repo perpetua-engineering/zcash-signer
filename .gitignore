@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.swp
+*.swo
+*.xcuserstate
+xcuserdata/
+
+# pczt-cli state (local wallet data)
+# Note: wallet.json contains UFVK which is safe to share, but not secrets
+
+# Build artifacts
+__.SYMDEF
+pczt-cli/libzcash_signer.a
+macos-universal/
+vendor/ZcashSigner.xcframework/
+
+# Build artifacts
+build/

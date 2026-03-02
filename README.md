@@ -1,0 +1,369 @@
+# zcash-signer
+
+Minimal Zcash signing primitives for watchOS. This crate provides the cryptographic operations needed for Orchard PCZT (Partially Created Zcash Transaction) signing on Apple Watch.
+
+## Features
+
+- **ZIP-32 Orchard key derivation** - Derive spending keys and `ask` from BIP-39 seeds
+- **ZIP-32 Sapling key derivation** - Derive Sapling spending keys and `ask` for legacy shielded funds
+- **RedPallas signing** - Sign Orchard spends for PCZT
+- **RedJubjub signing** - Sign Sapling spends for PCZT
+- **Combined UFVK generation** - Produce Unified Full Viewing Keys with Transparent + Sapling + Orchard
+- **BIP-44 transparent addresses** - Derive t-addresses for CEX compatibility
+- **PCZT signing** — Sign full PCZTs (Orchard, Sapling, transparent) in one call
+- **Secure PCZT signing** — SE-encrypted mnemonic never leaves Rust; keys zeroized on drop
+- **`no_std` compatible** - Runs on watchOS tier-3 targets (arm64, arm64_32)
+
+## Building
+
+### Prerequisites
+
+- Rust nightly toolchain
+- Xcode Command Line Tools
+
+```bash
+# Install nightly
+rustup install nightly
+
+# Build for all Apple platforms
+./build-xcframework.sh
+```
+
+The build script enables `pczt-signer` and `secure-signer` by default.
+For a minimal build without PCZT support, edit `FEATURES` in `build-xcframework.sh`.
+
+This creates:
+- `target/watchos-device-universal/libzcash_signer.a` (arm64 + arm64_32)
+- `target/watchos-sim-universal/libzcash_signer.a` (arm64 + x86_64)
+- `target/ios-device/libzcash_signer.a`
+- `target/ios-sim-universal/libzcash_signer.a`
+- `target/macos-universal/libzcash_signer.a`
+- `ZcashSigner.xcframework/`
+
+## Integration
+
+### Option 1: Local Swift Package (Recommended)
+
+1. Add the package to your Xcode project:
+   - File → Add Package Dependencies → Add Local → select `zcash-signer` directory
+
+2. Add to your target's **Build Settings**:
+   ```
+   OTHER_LDFLAGS = -lzcash_signer
+
+   LIBRARY_SEARCH_PATHS[sdk=watchos*] = $(PROJECT_DIR)/../zcash-signer/target/watchos-device-universal
+   LIBRARY_SEARCH_PATHS[sdk=watchsimulator*] = $(PROJECT_DIR)/../zcash-signer/target/watchos-sim-universal
+   LIBRARY_SEARCH_PATHS[sdk=iphoneos*] = $(PROJECT_DIR)/../zcash-signer/target/ios-device
+   LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = $(PROJECT_DIR)/../zcash-signer/target/ios-sim-universal
+   ```
+
+3. Import in Swift:
+   ```swift
+   import ZcashSignerCore
+   ```
+
+### Option 2: Direct Static Library
+
+1. Copy the appropriate `.a` file to your project
+2. Add the header search path to `include/`
+3. Link against `libzcash_signer.a`
+
+## API Usage
+
+### Key Derivation
+
+```swift
+import ZcashSignerCore
+
+// From a BIP-39 seed (64 bytes)
+let seed: Data = ... // your mnemonic-derived seed
+
+// Derive Orchard ask (spend authorization key) directly from seed
+let orchardAsk = try ZcashOrchardAsk.deriveFromSeed(seed, account: 0)
+
+// Or step-by-step:
+let spendingKey = try ZcashOrchardSpendingKey.deriveFromSeed(seed, account: 0)
+let orchardAsk = try spendingKey.deriveAsk()
+
+// Derive ak (authorization key) for verification
+let ak = try orchardAsk.deriveAk()  // 32 bytes
+
+// Derive Sapling ask for legacy shielded funds
+let saplingAsk = try ZcashSaplingAsk.deriveFromSeed(seed, account: 0)
+
+// Derive Sapling ak (authorization key) for verification
+let saplingAk = try saplingAsk.deriveAk()  // 32 bytes
+```
+
+### PCZT Signing
+
+```swift
+// Sign a full PCZT (preferred — handles alpha generation internally)
+let pcztData: Data = ...  // raw PCZT binary from phone
+let spendingKey = try ZcashOrchardSpendingKey.deriveFromSeed(seed, account: 0)
+
+let signedPczt = try pcztSign(
+    pcztData: pcztData,
+    orchardSpendingKey: spendingKey.bytes,
+    saplingAsk: saplingAsk.bytes
+)
+
+// Or with SE-encrypted mnemonic (keys never leave Rust)
+let signedPczt = try pcztSignSecure(
+    pcztData: pcztData,
+    encryptedMnemonic: encryptedBlob,
+    account: 0
+)
+```
+
+### UFVK Derivation
+
+```swift
+// Derive combined UFVK (Transparent + Sapling + Orchard)
+let ufvk = try deriveCombinedUFVKString(
+    seed: seed,
+    coinType: ZSIG_MAINNET_COIN_TYPE,
+    account: 0,
+    mainnet: true
+)
+// Returns "uview1..." string validated by SDK
+```
+
+### Transparent Addresses
+
+```swift
+// First, find the valid diversifier index for ZIP-316 UA compatibility
+let (diversifierIndex, _) = try deriveFirstValidDiversifierIndex(
+    seed: seed,
+    coinType: 133,  // mainnet
+    account: 0
+)
+
+// Derive t-address using the diversifier index
+// BIP-44 path: m/44'/133'/account'/0/index
+let tAddress = try deriveTransparentAddress(
+    seed: seed,
+    account: 0,
+    index: UInt32(diversifierIndex),
+    mainnet: true
+)
+// Returns "t1..." string matching the UA's transparent receiver
+
+// Or just the pubkey hash (for Unified Address construction)
+let pubkeyHash = try deriveTransparentPubkeyHash(
+    seed: seed,
+    account: 0,
+    index: UInt32(diversifierIndex)
+)
+// Returns 20 bytes
+```
+
+## FFI Functions
+
+For direct C/Objective-C usage:
+
+### Orchard (RedPallas)
+
+| Function | Description |
+|----------|-------------|
+| `zsig_derive_orchard_spending_key` | ZIP-32 spending key from seed |
+| `zsig_derive_orchard_ask` | Extract ask from spending key |
+| `zsig_derive_orchard_ask_from_seed` | Convenience: ask directly from seed |
+| `zsig_sign_orchard` | Sign with spend authorization key |
+| `zsig_verify_orchard` | Signature verification |
+| `zsig_derive_ak_from_ask` | Derive authorization key |
+| `zsig_derive_orchard_full_viewing_key` | Derive Orchard FVK (ak, nk, rivk) |
+
+### Sapling (RedJubjub)
+
+| Function | Description |
+|----------|-------------|
+| `zsig_derive_sapling_spending_key` | ZIP-32 spending key from seed |
+| `zsig_derive_sapling_ask` | Extract ask from spending key |
+| `zsig_derive_sapling_ask_from_seed` | Convenience: ask directly from seed |
+| `zsig_sign_sapling` | Sign with spend authorization key |
+| `zsig_verify_sapling` | Signature verification |
+| `zsig_derive_sapling_ak_from_ask` | Derive authorization key |
+| `zsig_derive_sapling_full_viewing_key` | Derive Sapling FVK (ak, nk, ovk, dk) |
+
+### Transparent (secp256k1)
+
+| Function | Description |
+|----------|-------------|
+| `zsig_derive_transparent_address` | BIP-44 t-address string |
+| `zsig_derive_transparent_pubkey_hash` | BIP-44 pubkey hash (20 bytes) |
+| `zsig_derive_transparent_fvk` | BIP-44 extended pubkey (chain code + pubkey) |
+| `zsig_sign_transparent` | Sign transparent input (DER signature) |
+
+### UFVK (ZIP-316)
+
+| Function | Description |
+|----------|-------------|
+| `zsig_derive_combined_ufvk_string` | Derive full UFVK (Transparent + Sapling + Orchard) |
+| `zsig_encode_unified_full_viewing_key` | Encode Orchard-only FVK as UFVK |
+| `zsig_encode_combined_ufvk` | Encode combined FVK as UFVK |
+
+### PCZT (full-transaction signing)
+
+| Function | Description |
+|----------|-------------|
+| `zsig_pczt_info` | Parse PCZT and return summary (action/spend/input counts) |
+| `zsig_pczt_sign` | Sign PCZT with provided key bytes (Orchard, Sapling, transparent) |
+| `zsig_pczt_sign_secure` | Sign PCZT using SE-encrypted mnemonic (keys never leave Rust) |
+| `zsig_free` | Free heap-allocated buffer from `zsig_pczt_sign_secure` |
+
+## Architecture Notes
+
+For a deep dive on the `no_std` design, allocator, RNG bridge, vendor patches, and
+build pipeline, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+### Why This Exists
+
+The upstream `orchard` and `sapling-crypto` crates' ZIP-32 key derivation requires `std`, which isn't available on watchOS (tier-3 target). This crate implements the same algorithms using `no_std`-compatible primitives:
+
+- `reddsa` for RedPallas (Orchard) and RedJubjub (Sapling) signatures
+- `pasta_curves` for Pallas scalar/point operations (Orchard)
+- `jubjub` for Jubjub scalar/point operations (Sapling)
+- `blake2b_simd` (vendored) for ZIP-32 PRF^expand
+- `sinsemilla` for IVK derivation
+- `k256` for secp256k1 operations (transparent)
+
+### Signing Flow
+
+```
+Phone (SDK)                          Watch (this crate)
+─────────────────────────────────────────────────────────
+1. Build PCZT with:
+   - Transaction structure
+   - Spend descriptors
+                    ──────────────►
+                                     2. zsig_pczt_sign_secure:
+                                        - Decrypt SE-encrypted mnemonic
+                                        - Derive keys per pool
+                                        - Sign all Orchard, Sapling, transparent
+                                        - Zeroize keys on drop
+                    ◄──────────────
+3. Apply signed PCZT
+4. Generate zk-SNARK proofs
+5. Broadcast transaction
+```
+
+#### Secure signing path (`zsig_pczt_sign_secure`)
+
+```
+Phone (SDK)                          Watch
+─────────────────────────────────────────────────────────
+1. Build PCZT
+                    ──────────────►
+                                     2. Receive SE-encrypted mnemonic blob
+                                     3. Decrypt seed in C++ (wallet-core)
+                                     4. Pass seed to Rust via FFI
+                                     5. Derive Zeroizing<SpendingKey> for each pool
+                                     6. Sign all spends (Orchard, Sapling, transparent)
+                                     7. Keys zeroized on drop
+                    ◄──────────────
+8. Apply signed PCZT
+9. Prove & broadcast
+```
+
+### Vendor Patches
+
+The `vendor/` directory contains patched versions of:
+
+- **blake2b_simd** - Disabled `std` feature (CPU detection hangs on watchOS simulator)
+- **constant_time_eq** - Fixed arm64_32 NEON code (upstream uses hardcoded u64 for pointers)
+
+## Testing
+
+```bash
+# Swift wrapper tests (uses macos-universal library)
+cd /path/to/zcash-signer
+swift test
+
+# Rust cross-check tests (validate against upstream crates)
+cargo test --features debug-tools
+```
+
+The Rust test suite (`tests/`) cross-checks our `no_std` implementations against the
+upstream `orchard`, `sapling-crypto`, and `zcash_transparent` crates:
+
+| Test module | What it validates |
+|-------------|-------------------|
+| `orchard_derivation` | ZIP-32 Orchard spending key, ask, ak derivation |
+| `sapling_derivation` | ZIP-32 Sapling spending key, ask, ak, FVK derivation |
+| `address_derivation` | BIP-44 transparent addresses, diversifier indices, Orchard addresses |
+| `ufvk_encoding` | ZIP-316 UFVK encoding (F4Jumble + Bech32m) against reference |
+
+## Security
+
+- Keys are never logged or persisted by this library
+- RNG is provided via callback (use `SecRandomCopyBytes` on Apple platforms)
+- All operations use constant-time implementations where available
+- `secure-signer` feature wraps seed and keys in `Zeroizing<T>` (zeroed on drop)
+- `zsig_pczt_sign_secure` accepts SE-encrypted mnemonic — seed decrypted in C++, used in Rust, never exposed to Swift
+
+## Cargo Features
+
+| Feature | Description |
+|---------|-------------|
+| `pczt-signer` | PCZT parsing and signing |
+| `secure-signer` | Zeroizing key management (includes `pczt-signer`) |
+| `debug-tools` | BIP-39 mnemonic parsing, reference key comparison |
+| `std` | Standard library (not available on watchOS) |
+
+## PCZT Workflow with pczt-cli
+
+The `pczt-cli` tool demonstrates the complete PCZT (Partially Created Zcash Transaction) workflow, simulating the phone + watch signing flow.
+
+### Prerequisites
+
+```bash
+# Set your BIP-39 seed (24 words or 64-byte hex)
+export ZCASH_SEED="your twenty four word mnemonic phrase here ..."
+
+# Build the CLI
+swift build --product pczt-cli
+```
+
+### Complete Shielding Flow
+
+```bash
+# 1. Initialize wallet (derives UFVK for phone)
+pczt-cli init
+# Outputs: { "ufvk": "uview1..." }
+
+# 2. Sync with lightwalletd
+pczt-cli sync
+
+# 3. Create shielding proposal (transparent → Orchard)
+pczt-cli propose shield 100000
+# Outputs: { "proposal_id": "..." }
+
+# 4. Create PCZT from proposal
+pczt-cli create-pczt <proposal_id>
+# Outputs: { "pczt_file": "~/.pczt-cli/pczts/pczt_xxx.bin" }
+
+# 5. Sign PCZT (simulates watch — derives keys from seed, signs all pools)
+pczt-cli sign <pczt_file>
+# Outputs: { "pczt_file": "~/.pczt-cli/pczts/pczt_xxx_signed.bin" }
+
+# 6. Generate zk-SNARK proofs (phone)
+pczt-cli prove <pczt_file>
+# Outputs: { "pczt_file": "~/.pczt-cli/pczts/pczt_xxx_proven.bin" }
+
+# 7. Broadcast (combines proven + signed PCZTs)
+pczt-cli broadcast <proven_pczt> <signed_pczt>
+# Outputs: { "success": true, "txid": "267a2d9e..." }
+```
+
+### Key Insights for PCZT Integration
+
+1. **Dummy Orchard Spends**: Shielding transactions have dummy Orchard spends (no real inputs). These are signed during IO Finalization with an internal key. The Signer role handles these automatically.
+
+2. **Split Sign/Prove Flow**: Signatures and proofs can be generated independently and combined at broadcast time. This enables the watch to sign while the phone generates proofs in parallel.
+
+3. **Alpha Handling**: The upstream `pczt` Signer role generates alpha randomizers internally with proper rejection sampling. Callers never need to handle raw scalars.
+
+## License
+
+MIT
