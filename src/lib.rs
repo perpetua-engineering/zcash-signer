@@ -82,6 +82,12 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+// Android cdylib: even with panic=abort, no_std codegen may emit references to
+// rust_eh_personality. Provide a stub so the dynamic linker doesn't fail.
+#[cfg(all(not(feature = "std"), not(test), target_os = "android"))]
+#[no_mangle]
+pub extern "C" fn rust_eh_personality() {}
+
 // -----------------------------------------------------------------------------
 // Error Types
 // -----------------------------------------------------------------------------
