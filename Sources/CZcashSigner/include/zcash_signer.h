@@ -547,6 +547,7 @@ typedef struct {
  *   ZSIG_SUCCESS on success, error code on failure
  */
 ZsigError zsig_derive_orchard_address(const uint8_t* spending_key,
+                                       uint64_t diversifier_index,
                                        ZsigOrchardAddress* address_out);
 
 /*
@@ -566,6 +567,7 @@ ZsigError zsig_derive_orchard_address_from_seed(const uint8_t* seed,
                                                  size_t seed_len,
                                                  uint32_t coin_type,
                                                  uint32_t account,
+                                                 uint64_t diversifier_index,
                                                  ZsigOrchardAddress* address_out);
 
 /* ============================================================================
@@ -951,6 +953,7 @@ int32_t zsig_derive_orchard_address_secure(const uint8_t* encrypted_mnemonic,
                                             const char* hkdf_salt,
                                             uint32_t coin_type,
                                             uint32_t account,
+                                            uint64_t diversifier_index,
                                             bool mainnet,
                                             uint8_t* output,
                                             size_t output_len);

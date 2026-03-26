@@ -540,7 +540,8 @@ public struct ZcashOrchardAddress {
     public static func deriveFromSeed(
         _ seed: Data,
         coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
-        account: UInt32 = 0
+        account: UInt32 = 0,
+        diversifierIndex: UInt64 = 0
     ) throws -> ZcashOrchardAddress {
         var address = ZsigOrchardAddress()
 
@@ -550,6 +551,7 @@ public struct ZcashOrchardAddress {
                 seed.count,
                 coinType,
                 account,
+                diversifierIndex,
                 &address
             )
         }
@@ -1110,7 +1112,8 @@ public func deriveOrchardAddressSecure(
     seKeyRef: SecKey,
     hkdfSalt: String,
     coinType: UInt32,
-    account: UInt32
+    account: UInt32,
+    diversifierIndex: UInt64 = 0
 ) throws -> String {
     var output = [UInt8](repeating: 0, count: 256)
 
@@ -1124,6 +1127,7 @@ public func deriveOrchardAddressSecure(
                 saltPtr,
                 coinType,
                 account,
+                diversifierIndex,
                 true, // mainnet
                 &output,
                 256

@@ -35,11 +35,20 @@ extern "C" {
         seed_len: usize,
         coin_type: u32,
         account: u32,
+        diversifier_index: u64,
         address_out: *mut ZsigOrchardAddress,
     ) -> ZsigError;
 
     fn zsig_encode_unified_address(
         address: *const ZsigOrchardAddress,
+        mainnet: bool,
+        output: *mut u8,
+        output_len: usize,
+    ) -> usize;
+
+    fn zsig_encode_unified_address_with_transparent(
+        address: *const ZsigOrchardAddress,
+        transparent_pkh: *const u8,
         mainnet: bool,
         output: *mut u8,
         output_len: usize,
@@ -176,6 +185,7 @@ pub unsafe extern "C" fn zsig_derive_orchard_address_secure(
     hkdf_salt: *const c_char,
     coin_type: u32,
     account: u32,
+    diversifier_index: u64,
     mainnet: bool,
     output: *mut u8,
     output_len: usize,
@@ -202,19 +212,38 @@ pub unsafe extern "C" fn zsig_derive_orchard_address_secure(
         64,
         coin_type,
         account,
+        diversifier_index,
         address.as_mut_ptr(),
+    );
+
+    if result != ZsigError::Success {
+        drop(seed);
+        return -(result as i32);
+    }
+
+    // Derive transparent pubkey hash for the same diversifier index
+    let mut pkh = [0u8; 20];
+    let pkh_result = zsig_derive_transparent_pubkey_hash(
+        seed.as_ptr(),
+        64,
+        account,
+        diversifier_index as u32,
+        pkh.as_mut_ptr(),
     );
 
     drop(seed); // zeroize seed
 
-    if result != ZsigError::Success {
-        return -(result as i32);
-    }
-
     let address = address.assume_init();
 
-    // Encode as Unified Address
-    let len = zsig_encode_unified_address(&address, mainnet, output, output_len);
+    // Encode as Unified Address with Orchard + transparent receivers
+    let len = if pkh_result == ZsigError::Success {
+        zsig_encode_unified_address_with_transparent(
+            &address, pkh.as_ptr(), mainnet, output, output_len,
+        )
+    } else {
+        // Fallback to Orchard-only if transparent derivation fails
+        zsig_encode_unified_address(&address, mainnet, output, output_len)
+    };
     if len == 0 {
         return -(ZsigError::BufferTooSmall as i32);
     }

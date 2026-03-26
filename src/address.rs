@@ -471,6 +471,7 @@ fn sapling_proof_gen_basepoint() -> JubjubPoint {
 #[no_mangle]
 pub unsafe extern "C" fn zsig_derive_orchard_address(
     spending_key: *const u8,
+    diversifier_index: u64,
     address_out: *mut ZsigOrchardAddress,
 ) -> ZsigError {
     if spending_key.is_null() || address_out.is_null() {
@@ -545,12 +546,11 @@ pub unsafe extern "C" fn zsig_derive_orchard_address(
     dk_input[..32].copy_from_slice(&ak.to_bytes());
     dk_input[32..64].copy_from_slice(&nk.to_repr());
 
-    let _dk_expanded = prf_expand_with_data(&rivk_bytes, ORCHARD_DK_OVK, &dk_input);
-    // Note: dk is used for diversifier derivation with FF1-AES
-    // For simplicity, we use the default diversifier (all zeros)
+    let dk_expanded = prf_expand_with_data(&rivk_bytes, ORCHARD_DK_OVK, &dk_input);
+    let dk: [u8; 32] = dk_expanded[..32].try_into().unwrap();
 
-    // Step 5: Use default diversifier (index 0)
-    let diversifier = [0u8; 11];
+    // Step 5: Derive diversifier from dk and index via FF1-AES256
+    let diversifier = crate::diversifier::derive_diversifier(&dk, diversifier_index);
 
     // Step 6: Compute g_d = DiversifyHash(diversifier)
     let g_d = pallas::Point::hash_to_curve(KEY_DIVERSIFICATION_PERSONALIZATION)(&diversifier);
@@ -579,6 +579,7 @@ pub unsafe extern "C" fn zsig_derive_orchard_address_from_seed(
     seed_len: usize,
     coin_type: u32,
     account: u32,
+    diversifier_index: u64,
     address_out: *mut ZsigOrchardAddress,
 ) -> ZsigError {
     if seed.is_null() || address_out.is_null() {
@@ -605,7 +606,7 @@ pub unsafe extern "C" fn zsig_derive_orchard_address_from_seed(
     derive_orchard_child(&mut sk, &mut chain_code, account | 0x80000000);
 
     // Derive address from spending key
-    zsig_derive_orchard_address(sk.as_ptr(), address_out)
+    zsig_derive_orchard_address(sk.as_ptr(), diversifier_index, address_out)
 }
 
 // -----------------------------------------------------------------------------
