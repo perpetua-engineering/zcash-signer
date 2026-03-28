@@ -258,7 +258,7 @@ ZcashSigner.xcframework/
     └── macos-arm64_x86_64/
 ```
 
-The wrapper script `tools/rebuild-deps.sh signer` in the main repo handles cache
+The repo helper `tools/build-deps ios signer` handles cache
 management and manifest tracking. Development builds (`--dev`) skip the full 9-slice
 matrix and build only the slices needed for simulator testing.
 
