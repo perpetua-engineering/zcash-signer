@@ -162,6 +162,10 @@ fn validate_common_params(
     Ok(())
 }
 
+fn transparent_index_from_diversifier(diversifier_index: u64) -> Result<u32, ZsigError> {
+    u32::try_from(diversifier_index).map_err(|_| ZsigError::InvalidKey)
+}
+
 // ---------------------------------------------------------------------------
 // FFI: Orchard Unified Address (secure)
 // ---------------------------------------------------------------------------
@@ -198,6 +202,11 @@ pub unsafe extern "C" fn zsig_derive_orchard_address_secure(
         return -(e as i32);
     }
 
+    let transparent_index = match transparent_index_from_diversifier(diversifier_index) {
+        Ok(index) => index,
+        Err(e) => return -(e as i32),
+    };
+
     let enc_slice = slice::from_raw_parts(encrypted_mnemonic, encrypted_mnemonic_len);
 
     let seed = match derive_seed_secure(enc_slice, se_key_ref, hkdf_salt) {
@@ -227,7 +236,7 @@ pub unsafe extern "C" fn zsig_derive_orchard_address_secure(
         seed.as_ptr(),
         64,
         account,
-        diversifier_index as u32,
+        transparent_index,
         pkh.as_mut_ptr(),
     );
 
@@ -238,7 +247,11 @@ pub unsafe extern "C" fn zsig_derive_orchard_address_secure(
     // Encode as Unified Address with Orchard + transparent receivers
     let len = if pkh_result == ZsigError::Success {
         zsig_encode_unified_address_with_transparent(
-            &address, pkh.as_ptr(), mainnet, output, output_len,
+            &address,
+            pkh.as_ptr(),
+            mainnet,
+            output,
+            output_len,
         )
     } else {
         // Fallback to Orchard-only if transparent derivation fails
@@ -449,4 +462,24 @@ pub unsafe extern "C" fn zsig_derive_first_valid_diversifier_index_secure(
     drop(seed);
 
     result as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transparent_index_from_diversifier;
+    use crate::ZsigError;
+
+    #[test]
+    fn transparent_index_accepts_u32_range() {
+        assert_eq!(transparent_index_from_diversifier(0), Ok(0));
+        assert_eq!(transparent_index_from_diversifier(u32::MAX as u64), Ok(u32::MAX));
+    }
+
+    #[test]
+    fn transparent_index_rejects_values_above_u32_max() {
+        assert_eq!(
+            transparent_index_from_diversifier(u32::MAX as u64 + 1),
+            Err(ZsigError::InvalidKey)
+        );
+    }
 }
