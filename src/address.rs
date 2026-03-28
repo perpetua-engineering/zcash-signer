@@ -5,21 +5,21 @@
 //! - Unified Address encoding (ZIP-316)
 //! - Unified Full Viewing Key (UFVK) derivation and encoding
 
-use core::slice;
 use crate::ZsigError;
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 use blake2b_simd::Params;
-use ff::{PrimeField, FromUniformBytes};
-use pasta_curves::pallas;
-use pasta_curves::arithmetic::CurveExt;
+use core::slice;
+use ff::{FromUniformBytes, PrimeField};
 use group::GroupEncoding;
-use sinsemilla::CommitDomain;
 use hmac::{Hmac, Mac};
-use sha2::Sha512;
-use k256::{Scalar, SecretKey, elliptic_curve::sec1::ToEncodedPoint};
-use jubjub::{ExtendedPoint as JubjubPoint, AffinePoint as JubjubAffine};
+use jubjub::{AffinePoint as JubjubAffine, ExtendedPoint as JubjubPoint};
+use k256::{elliptic_curve::sec1::ToEncodedPoint, Scalar, SecretKey};
+use pasta_curves::arithmetic::CurveExt;
+use pasta_curves::pallas;
 use reddsa::sapling::SpendAuth as SaplingSpendAuth;
+use sha2::Sha512;
+use sinsemilla::CommitDomain;
 
 type HmacSha512 = Hmac<Sha512>;
 
@@ -161,8 +161,8 @@ fn to_scalar(bytes: &[u8; 64]) -> pallas::Scalar {
 
 /// Derive BIP-32 master key from seed
 fn bip32_master_key(seed: &[u8]) -> ([u8; 32], [u8; 32]) {
-    let mut mac = HmacSha512::new_from_slice(b"Bitcoin seed")
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha512::new_from_slice(b"Bitcoin seed").expect("HMAC can take key of any size");
     mac.update(seed);
     let result = mac.finalize().into_bytes();
 
@@ -400,10 +400,7 @@ fn to_5bit_groups(bytes: &[u8]) -> Vec<u8> {
 
 /// BLAKE2b-512 with personalization
 fn blake2b_personal(personal: &[u8], data: &[u8]) -> [u8; 64] {
-    let result = Params::new()
-        .hash_length(64)
-        .personal(personal)
-        .hash(data);
+    let result = Params::new().hash_length(64).personal(personal).hash(data);
 
     let mut output = [0u8; 64];
     output.copy_from_slice(result.as_bytes());
@@ -436,10 +433,9 @@ fn derive_orchard_child(sk: &mut [u8; 32], chain_code: &mut [u8; 32], index: u32
 /// [0x467a_f9f7_e05d_e8e7, 0x50df_51ea_f5a1_49d2, 0xdec9_0184_0f49_48cc, 0x54b6_d107_18df_2a7a]
 /// The sign bit IS set since x LSB = 1.
 const SAPLING_PROOF_GEN_KEY_GENERATOR: [u8; 32] = [
-    0xe7, 0xe8, 0x5d, 0xe0, 0xf7, 0xf9, 0x7a, 0x46,
-    0xd2, 0x49, 0xa1, 0xf5, 0xea, 0x51, 0xdf, 0x50,
-    0xcc, 0x48, 0x49, 0x0f, 0x84, 0x01, 0xc9, 0xde,
-    0x7a, 0x2a, 0xdf, 0x18, 0x07, 0xd1, 0xb6, 0xd4, // 0xd4 (sign bit set)
+    0xe7, 0xe8, 0x5d, 0xe0, 0xf7, 0xf9, 0x7a, 0x46, 0xd2, 0x49, 0xa1, 0xf5, 0xea, 0x51, 0xdf, 0x50,
+    0xcc, 0x48, 0x49, 0x0f, 0x84, 0x01, 0xc9, 0xde, 0x7a, 0x2a, 0xdf, 0x18, 0x07, 0xd1, 0xb6,
+    0xd4, // 0xd4 (sign bit set)
 ];
 
 /// Get Sapling Proof Generation Key basepoint (for nk derivation)
@@ -516,13 +512,15 @@ pub unsafe extern "C" fn zsig_derive_orchard_address(
     let ak_bits = ak_base.to_repr();
     let nk_bits = nk.to_repr();
 
-    let msg_bits = ak_bits.iter()
+    let msg_bits = ak_bits
+        .iter()
         .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1))
         .take(L_ORCHARD_BASE)
         .chain(
-            nk_bits.iter()
+            nk_bits
+                .iter()
                 .flat_map(|byte| (0..8).map(move |i| (byte >> i) & 1 == 1))
-                .take(L_ORCHARD_BASE)
+                .take(L_ORCHARD_BASE),
         );
 
     let ivk_result = commit_domain.short_commit(msg_bits, &rivk);
@@ -642,7 +640,7 @@ pub unsafe extern "C" fn zsig_encode_unified_address(
     // Total: 45 (TLV) + 16 (padding) = 61 bytes (minimum 48 for F4Jumble)
     let mut raw = [0u8; 61];
     raw[0] = 0x03; // Orchard receiver type
-    raw[1] = 43;   // Length: 11 + 32
+    raw[1] = 43; // Length: 11 + 32
     raw[2..13].copy_from_slice(&addr.diversifier);
     raw[13..45].copy_from_slice(&addr.pk_d);
 
@@ -701,33 +699,40 @@ pub unsafe extern "C" fn zsig_encode_unified_address_with_transparent(
     }
 
     let orchard = &*orchard_addr;
-    let transparent: [u8; 20] = slice::from_raw_parts(transparent_pkh, 20).try_into().unwrap();
+    let transparent: [u8; 20] = slice::from_raw_parts(transparent_pkh, 20)
+        .try_into()
+        .unwrap();
+    let hrp = if mainnet { "u" } else { "utest" };
 
     // TLV receivers ordered by typecode ascending:
     // P2PKH transparent: [0x00] || [20] || pubkey_hash (22 bytes)
     // Orchard:           [0x03] || [43] || diversifier (11) || pk_d (32) (45 bytes)
-    // Total: 67 bytes
-    let mut tlv = [0u8; 67];
+    // ZIP-316 requires the HRP, right-padded with zeros to 16 bytes, to be
+    // appended before F4Jumble.
+    // Total: 67 (TLV) + 16 (padding) = 83 bytes
+    let mut raw = [0u8; 83];
 
     // P2PKH transparent receiver (typecode 0x00)
-    tlv[0] = 0x00;
-    tlv[1] = 20;
-    tlv[2..22].copy_from_slice(&transparent);
+    raw[0] = 0x00;
+    raw[1] = 20;
+    raw[2..22].copy_from_slice(&transparent);
 
     // Orchard receiver (typecode 0x03)
-    tlv[22] = 0x03;
-    tlv[23] = 43;
-    tlv[24..35].copy_from_slice(&orchard.diversifier);
-    tlv[35..67].copy_from_slice(&orchard.pk_d);
+    raw[22] = 0x03;
+    raw[23] = 43;
+    raw[24..35].copy_from_slice(&orchard.diversifier);
+    raw[35..67].copy_from_slice(&orchard.pk_d);
+
+    let hrp_bytes = hrp.as_bytes();
+    raw[67..67 + hrp_bytes.len()].copy_from_slice(hrp_bytes);
 
     // Apply F4Jumble
-    let mut jumbled = [0u8; 67];
-    if !f4_jumble(&tlv, &mut jumbled) {
+    let mut jumbled = [0u8; 83];
+    if !f4_jumble(&raw, &mut jumbled) {
         return 0;
     }
 
     // Encode as Bech32m
-    let hrp = if mainnet { "u" } else { "utest" };
     let data_5bit = to_5bit_groups(&jumbled);
 
     let encoded = match bech32_encode(hrp, &data_5bit) {
@@ -966,7 +971,7 @@ pub unsafe extern "C" fn zsig_encode_unified_full_viewing_key(
     // Total: 98 + 16 = 114 bytes
     let mut raw = [0u8; 114];
     raw[0] = 0x03; // Orchard FVK type
-    raw[1] = 96;   // Length: 32 + 32 + 32
+    raw[1] = 96; // Length: 32 + 32 + 32
     raw[2..34].copy_from_slice(&fvk_ref.ak);
     raw[34..66].copy_from_slice(&fvk_ref.nk);
     raw[66..98].copy_from_slice(&fvk_ref.rivk);
@@ -1030,13 +1035,7 @@ pub unsafe extern "C" fn zsig_derive_ufvk_string(
         rivk: [0u8; 32],
     };
 
-    let result = zsig_derive_orchard_full_viewing_key(
-        seed,
-        seed_len,
-        coin_type,
-        account,
-        &mut fvk,
-    );
+    let result = zsig_derive_orchard_full_viewing_key(seed, seed_len, coin_type, account, &mut fvk);
 
     if result as i32 != 0 {
         return -(result as i32);
@@ -1218,14 +1217,14 @@ pub unsafe extern "C" fn zsig_encode_combined_full_viewing_key(
     let mut raw = [0u8; 311];
 
     // Transparent P2PKH FVK (typecode 0x00) - ZIP-316 format
-    raw[0] = 0x00;  // Transparent P2PKH type
-    raw[1] = 65;    // Length: 32 (chain_code) + 33 (pubkey) = 65 bytes
+    raw[0] = 0x00; // Transparent P2PKH type
+    raw[1] = 65; // Length: 32 (chain_code) + 33 (pubkey) = 65 bytes
     raw[2..34].copy_from_slice(&fvk_ref.transparent.chain_code);
     raw[34..67].copy_from_slice(&fvk_ref.transparent.pubkey);
 
     // Sapling FVK (typecode 0x02)
-    raw[67] = 0x02;   // Sapling type
-    raw[68] = 128;    // Length: 32 + 32 + 32 + 32 = 128 bytes
+    raw[67] = 0x02; // Sapling type
+    raw[68] = 128; // Length: 32 + 32 + 32 + 32 = 128 bytes
     raw[69..101].copy_from_slice(&fvk_ref.sapling.ak);
     raw[101..133].copy_from_slice(&fvk_ref.sapling.nk);
     raw[133..165].copy_from_slice(&fvk_ref.sapling.ovk);
@@ -1233,7 +1232,7 @@ pub unsafe extern "C" fn zsig_encode_combined_full_viewing_key(
 
     // Orchard FVK (typecode 0x03)
     raw[197] = 0x03; // Orchard type
-    raw[198] = 96;   // Length: 32 + 32 + 32
+    raw[198] = 96; // Length: 32 + 32 + 32
     raw[199..231].copy_from_slice(&fvk_ref.orchard.ak);
     raw[231..263].copy_from_slice(&fvk_ref.orchard.nk);
     raw[263..295].copy_from_slice(&fvk_ref.orchard.rivk);
@@ -1362,13 +1361,8 @@ pub unsafe extern "C" fn zsig_derive_combined_ufvk_string(
         },
     };
 
-    let result = zsig_derive_combined_full_viewing_key(
-        seed,
-        seed_len,
-        coin_type,
-        account,
-        &mut fvk,
-    );
+    let result =
+        zsig_derive_combined_full_viewing_key(seed, seed_len, coin_type, account, &mut fvk);
 
     if result as i32 != 0 {
         return -(result as i32);
