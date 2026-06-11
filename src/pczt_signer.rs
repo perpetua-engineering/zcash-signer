@@ -9,9 +9,14 @@
 //! from the PCZT data itself — no external sighash parameter needed.
 
 use alloc::vec::Vec;
-use core::fmt;
+use core::{convert::Infallible, fmt, str};
 
 use pczt::roles::signer::Signer;
+use zcash_address::{
+    unified::{Container, Receiver},
+    ConversionError, TryFromAddress, ZcashAddress,
+};
+use zcash_protocol::consensus::NetworkType;
 
 // Re-export the upstream protocol crates' key types under clearer names.
 // "upstream_orchard" is the package rename for the crates.io orchard crate
@@ -43,6 +48,12 @@ pub enum PcztSignError {
     SaplingSignFailed,
     /// Transparent signing failed.
     TransparentSignFailed,
+    /// Recipient address could not be parsed for summary verification.
+    InvalidRecipientAddress,
+    /// PCZT values needed for summary verification are unavailable.
+    SummaryUnavailable,
+    /// PCZT value balance overflowed the verifier's arithmetic.
+    SummaryOverflow,
 }
 
 impl fmt::Display for PcztSignError {
@@ -55,6 +66,9 @@ impl fmt::Display for PcztSignError {
             Self::OrchardSignFailed => write!(f, "Orchard signing failed"),
             Self::SaplingSignFailed => write!(f, "Sapling signing failed"),
             Self::TransparentSignFailed => write!(f, "transparent signing failed"),
+            Self::InvalidRecipientAddress => write!(f, "invalid recipient address"),
+            Self::SummaryUnavailable => write!(f, "PCZT summary unavailable"),
+            Self::SummaryOverflow => write!(f, "PCZT summary overflow"),
         }
     }
 }
@@ -191,6 +205,115 @@ pub fn pczt_info(pczt_bytes: &[u8]) -> Result<PcztInfo, PcztSignError> {
     })
 }
 
+/// Extract the recipient amount and transaction fee from a PCZT.
+///
+/// The watch compares this summary against the approval fields before signing so
+/// a compromised phone cannot show benign text while supplying different bytes.
+pub fn pczt_summary(
+    pczt_bytes: &[u8],
+    recipient_address: &str,
+    network: NetworkType,
+) -> Result<PcztSummary, PcztSignError> {
+    let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|_| PcztSignError::ParseFailed)?;
+    let recipient = RecipientReceivers::parse(recipient_address, network)?;
+
+    let transparent_input_total = sum_u64(
+        pczt.transparent()
+            .inputs()
+            .iter()
+            .map(|input| *input.value()),
+    )?;
+    let transparent_output_total = sum_u64(
+        pczt.transparent()
+            .outputs()
+            .iter()
+            .map(|output| *output.value()),
+    )?;
+    let transparent_balance = transparent_input_total
+        .checked_sub(transparent_output_total)
+        .ok_or(PcztSignError::SummaryOverflow)?;
+
+    let orchard_value_sum = signed_orchard_value_sum(*pczt.orchard().value_sum())?;
+    let sapling_value_sum = *pczt.sapling().value_sum();
+    let fee = transparent_balance
+        .checked_add(orchard_value_sum)
+        .and_then(|value| value.checked_add(sapling_value_sum))
+        .ok_or(PcztSignError::SummaryOverflow)?;
+    if fee < 0 || fee > i128::from(u64::MAX) {
+        return Err(PcztSignError::SummaryUnavailable);
+    }
+
+    let mut amount: u128 = 0;
+    let mut matched_outputs: u32 = 0;
+    let mut has_unverified_recipient_amount = false;
+
+    for output in pczt.transparent().outputs() {
+        if recipient.matches_transparent_script(output.script_pubkey()) {
+            amount = amount
+                .checked_add(u128::from(*output.value()))
+                .ok_or(PcztSignError::SummaryOverflow)?;
+            matched_outputs = matched_outputs
+                .checked_add(1)
+                .ok_or(PcztSignError::SummaryOverflow)?;
+        } else if output.user_address().as_deref() == Some(recipient_address) {
+            has_unverified_recipient_amount = true;
+        }
+    }
+
+    for output in pczt.sapling().outputs() {
+        match (output.recipient(), output.value()) {
+            (Some(output_recipient), Some(value))
+                if recipient.sapling.as_ref() == Some(output_recipient) =>
+            {
+                amount = amount
+                    .checked_add(u128::from(*value))
+                    .ok_or(PcztSignError::SummaryOverflow)?;
+                matched_outputs = matched_outputs
+                    .checked_add(1)
+                    .ok_or(PcztSignError::SummaryOverflow)?;
+            }
+            _ if output.user_address().as_deref() == Some(recipient_address) => {
+                has_unverified_recipient_amount = true;
+            }
+            _ => {}
+        }
+    }
+
+    for action in pczt.orchard().actions() {
+        let output = action.output();
+        match (output.recipient(), output.value()) {
+            (Some(output_recipient), Some(value))
+                if recipient.orchard.as_ref() == Some(output_recipient) =>
+            {
+                amount = amount
+                    .checked_add(u128::from(*value))
+                    .ok_or(PcztSignError::SummaryOverflow)?;
+                matched_outputs = matched_outputs
+                    .checked_add(1)
+                    .ok_or(PcztSignError::SummaryOverflow)?;
+            }
+            _ if output.user_address().as_deref() == Some(recipient_address) => {
+                has_unverified_recipient_amount = true;
+            }
+            _ => {}
+        }
+    }
+
+    if amount > u128::from(u64::MAX) {
+        return Err(PcztSignError::SummaryOverflow);
+    }
+
+    Ok(PcztSummary {
+        recipient_amount_zatoshis: amount as u64,
+        fee_zatoshis: fee as u64,
+        matched_outputs,
+        transparent_outputs: pczt.transparent().outputs().len() as u32,
+        sapling_outputs: pczt.sapling().outputs().len() as u32,
+        orchard_outputs: pczt.orchard().actions().len() as u32,
+        has_unverified_recipient_amount,
+    })
+}
+
 /// Summary information extracted from a PCZT.
 #[derive(Debug)]
 pub struct PcztInfo {
@@ -202,6 +325,126 @@ pub struct PcztInfo {
     pub transparent_inputs: usize,
     /// Number of transparent outputs.
     pub transparent_outputs: usize,
+}
+
+/// PCZT-derived summary fields used for display-vs-bytes verification.
+#[derive(Debug)]
+pub struct PcztSummary {
+    pub recipient_amount_zatoshis: u64,
+    pub fee_zatoshis: u64,
+    pub matched_outputs: u32,
+    pub transparent_outputs: u32,
+    pub sapling_outputs: u32,
+    pub orchard_outputs: u32,
+    pub has_unverified_recipient_amount: bool,
+}
+
+#[derive(Default)]
+struct RecipientReceivers {
+    p2pkh: Option<[u8; 20]>,
+    p2sh: Option<[u8; 20]>,
+    sapling: Option<[u8; 43]>,
+    orchard: Option<[u8; 43]>,
+}
+
+impl RecipientReceivers {
+    fn parse(encoded: &str, network: NetworkType) -> Result<Self, PcztSignError> {
+        ZcashAddress::try_from_encoded(encoded)
+            .map_err(|_| PcztSignError::InvalidRecipientAddress)?
+            .convert_if_network(network)
+            .map_err(|_| PcztSignError::InvalidRecipientAddress)
+    }
+
+    fn matches_transparent_script(&self, script: &[u8]) -> bool {
+        match script {
+            [0x76, 0xa9, 0x14, hash @ .., 0x88, 0xac] if hash.len() == 20 => {
+                self.p2pkh.as_ref().is_some_and(|expected| expected == hash)
+            }
+            [0xa9, 0x14, hash @ .., 0x87] if hash.len() == 20 => {
+                self.p2sh.as_ref().is_some_and(|expected| expected == hash)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl TryFromAddress for RecipientReceivers {
+    type Error = Infallible;
+
+    fn try_from_sapling(
+        _net: NetworkType,
+        data: [u8; 43],
+    ) -> Result<Self, ConversionError<Self::Error>> {
+        Ok(Self {
+            sapling: Some(data),
+            ..Self::default()
+        })
+    }
+
+    fn try_from_unified(
+        _net: NetworkType,
+        data: zcash_address::unified::Address,
+    ) -> Result<Self, ConversionError<Self::Error>> {
+        let mut receivers = Self::default();
+        for receiver in data.items() {
+            match receiver {
+                Receiver::Orchard(bytes) => receivers.orchard = Some(bytes),
+                Receiver::Sapling(bytes) => receivers.sapling = Some(bytes),
+                Receiver::P2pkh(bytes) => receivers.p2pkh = Some(bytes),
+                Receiver::P2sh(bytes) => receivers.p2sh = Some(bytes),
+                Receiver::Unknown { .. } => {}
+            }
+        }
+        Ok(receivers)
+    }
+
+    fn try_from_transparent_p2pkh(
+        _net: NetworkType,
+        data: [u8; 20],
+    ) -> Result<Self, ConversionError<Self::Error>> {
+        Ok(Self {
+            p2pkh: Some(data),
+            ..Self::default()
+        })
+    }
+
+    fn try_from_transparent_p2sh(
+        _net: NetworkType,
+        data: [u8; 20],
+    ) -> Result<Self, ConversionError<Self::Error>> {
+        Ok(Self {
+            p2sh: Some(data),
+            ..Self::default()
+        })
+    }
+
+    fn try_from_tex(
+        _net: NetworkType,
+        data: [u8; 20],
+    ) -> Result<Self, ConversionError<Self::Error>> {
+        Ok(Self {
+            p2pkh: Some(data),
+            ..Self::default()
+        })
+    }
+}
+
+fn sum_u64(mut values: impl Iterator<Item = u64>) -> Result<i128, PcztSignError> {
+    values.try_fold(0i128, |sum, value| {
+        sum.checked_add(i128::from(value))
+            .ok_or(PcztSignError::SummaryOverflow)
+    })
+}
+
+fn signed_orchard_value_sum(value_sum: (u64, bool)) -> Result<i128, PcztSignError> {
+    let magnitude = i128::from(value_sum.0);
+    if value_sum.1 {
+        magnitude
+            .checked_neg()
+            .ok_or(PcztSignError::SummaryOverflow)
+    } else {
+        Ok(magnitude)
+    }
 }
 
 // =============================================================================
@@ -218,6 +461,18 @@ pub struct ZsigPcztInfo {
     pub sapling_spends: u32,
     pub transparent_inputs: u32,
     pub transparent_outputs: u32,
+}
+
+/// PCZT summary returned by `zsig_pczt_summary`.
+#[repr(C)]
+pub struct ZsigPcztSummary {
+    pub recipient_amount_zatoshis: u64,
+    pub fee_zatoshis: u64,
+    pub matched_outputs: u32,
+    pub transparent_outputs: u32,
+    pub sapling_outputs: u32,
+    pub orchard_outputs: u32,
+    pub has_unverified_recipient_amount: bool,
 }
 
 /// Maximum PCZT payload size (1 MB). Anything larger is rejected.
@@ -249,6 +504,59 @@ pub unsafe extern "C" fn zsig_pczt_info(
             (*info_out).sapling_spends = info.sapling_spends as u32;
             (*info_out).transparent_inputs = info.transparent_inputs as u32;
             (*info_out).transparent_outputs = info.transparent_outputs as u32;
+            ZsigError::Success
+        }
+        Err(_) => ZsigError::PcztParseFailed,
+    }
+}
+
+/// Extract recipient amount and fee information from a PCZT binary.
+///
+/// # Safety
+/// - `pczt_data` must point to `pczt_len` readable bytes
+/// - `recipient_address` must point to `recipient_address_len` readable UTF-8 bytes
+/// - `summary_out` must point to a valid `ZsigPcztSummary`
+#[no_mangle]
+pub unsafe extern "C" fn zsig_pczt_summary(
+    pczt_data: *const u8,
+    pczt_len: usize,
+    recipient_address: *const u8,
+    recipient_address_len: usize,
+    mainnet: bool,
+    summary_out: *mut ZsigPcztSummary,
+) -> ZsigError {
+    if pczt_data.is_null() || summary_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+    if recipient_address_len > 0 && recipient_address.is_null() {
+        return ZsigError::NullPointer;
+    }
+    if pczt_len == 0 || pczt_len > MAX_PCZT_LEN {
+        return ZsigError::BufferTooSmall;
+    }
+
+    let pczt_bytes = slice::from_raw_parts(pczt_data, pczt_len);
+    let recipient_bytes = slice::from_raw_parts(recipient_address, recipient_address_len);
+    let recipient = match str::from_utf8(recipient_bytes) {
+        Ok(value) if !value.is_empty() => value,
+        _ => return ZsigError::PcztParseFailed,
+    };
+    let network = if mainnet {
+        NetworkType::Main
+    } else {
+        NetworkType::Test
+    };
+
+    match pczt_summary(pczt_bytes, recipient, network) {
+        Ok(summary) => {
+            (*summary_out).recipient_amount_zatoshis = summary.recipient_amount_zatoshis;
+            (*summary_out).fee_zatoshis = summary.fee_zatoshis;
+            (*summary_out).matched_outputs = summary.matched_outputs;
+            (*summary_out).transparent_outputs = summary.transparent_outputs;
+            (*summary_out).sapling_outputs = summary.sapling_outputs;
+            (*summary_out).orchard_outputs = summary.orchard_outputs;
+            (*summary_out).has_unverified_recipient_amount =
+                summary.has_unverified_recipient_amount;
             ZsigError::Success
         }
         Err(_) => ZsigError::PcztParseFailed,
@@ -335,7 +643,10 @@ pub unsafe extern "C" fn zsig_pczt_sign(
                 | PcztSignError::InvalidTransparentKey => ZsigError::PcztInvalidKey,
                 PcztSignError::OrchardSignFailed
                 | PcztSignError::SaplingSignFailed
-                | PcztSignError::TransparentSignFailed => ZsigError::PcztSignFailed,
+                | PcztSignError::TransparentSignFailed
+                | PcztSignError::InvalidRecipientAddress
+                | PcztSignError::SummaryUnavailable
+                | PcztSignError::SummaryOverflow => ZsigError::PcztSignFailed,
             };
         }
     };

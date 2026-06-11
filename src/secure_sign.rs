@@ -95,7 +95,10 @@ fn pczt_sign_secure(
             | PcztSignError::InvalidTransparentKey => ZsigError::PcztInvalidKey,
             PcztSignError::OrchardSignFailed
             | PcztSignError::SaplingSignFailed
-            | PcztSignError::TransparentSignFailed => ZsigError::PcztSignFailed,
+            | PcztSignError::TransparentSignFailed
+            | PcztSignError::InvalidRecipientAddress
+            | PcztSignError::SummaryUnavailable
+            | PcztSignError::SummaryOverflow => ZsigError::PcztSignFailed,
         }
     })?;
 

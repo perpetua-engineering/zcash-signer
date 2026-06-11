@@ -809,6 +809,19 @@ typedef struct {
 } ZsigPcztInfo;
 
 /*
+ * PCZT-derived display summary returned by zsig_pczt_summary
+ */
+typedef struct {
+    uint64_t recipient_amount_zatoshis;
+    uint64_t fee_zatoshis;
+    uint32_t matched_outputs;
+    uint32_t transparent_outputs;
+    uint32_t sapling_outputs;
+    uint32_t orchard_outputs;
+    bool has_unverified_recipient_amount;
+} ZsigPcztSummary;
+
+/*
  * Extract summary information from a PCZT binary
  *
  * Parses the PCZT and returns counts of Orchard actions, Sapling spends,
@@ -829,6 +842,30 @@ typedef struct {
 ZsigError zsig_pczt_info(const uint8_t* pczt_data,
                           size_t pczt_len,
                           ZsigPcztInfo* info_out);
+
+/*
+ * Extract recipient amount and fee information from a PCZT binary.
+ *
+ * Parameters:
+ *   pczt_data: Pointer to raw PCZT binary data
+ *   pczt_len: Length of PCZT data (max 1 MB)
+ *   recipient_address: UTF-8 recipient address bytes
+ *   recipient_address_len: Length of recipient_address
+ *   mainnet: true for mainnet address parsing, false for testnet
+ *   summary_out: Pointer to receive the PCZT summary (must not be NULL)
+ *
+ * Returns:
+ *   ZSIG_SUCCESS on success
+ *   ZSIG_ERROR_NULL_POINTER if any required pointer is NULL
+ *   ZSIG_ERROR_BUFFER_TOO_SMALL if pczt_len is 0 or > 1MB
+ *   ZSIG_ERROR_PCZT_PARSE_FAILED if the PCZT or recipient address is invalid
+ */
+ZsigError zsig_pczt_summary(const uint8_t* pczt_data,
+                             size_t pczt_len,
+                             const uint8_t* recipient_address,
+                             size_t recipient_address_len,
+                             bool mainnet,
+                             ZsigPcztSummary* summary_out);
 
 /*
  * Sign a PCZT binary with the provided keys

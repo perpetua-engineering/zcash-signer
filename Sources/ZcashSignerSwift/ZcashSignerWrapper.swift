@@ -925,6 +925,24 @@ public struct ZcashPcztInfo {
     public let transparentOutputs: UInt32
 }
 
+/// Recipient amount and fee extracted from a PCZT binary
+public struct ZcashPcztSummary {
+    /// Amount paid to the requested recipient in zatoshis
+    public let recipientAmountZatoshis: UInt64
+    /// Transaction fee in zatoshis
+    public let feeZatoshis: UInt64
+    /// Number of outputs matching the requested recipient
+    public let matchedOutputs: UInt32
+    /// Number of transparent outputs in the PCZT
+    public let transparentOutputs: UInt32
+    /// Number of Sapling outputs in the PCZT
+    public let saplingOutputs: UInt32
+    /// Number of Orchard outputs in the PCZT
+    public let orchardOutputs: UInt32
+    /// True when PCZT data hints at the recipient but omits verifier fields
+    public let hasUnverifiedRecipientAmount: Bool
+}
+
 /// Extract summary information from a PCZT binary
 ///
 /// Parses the PCZT and returns counts of Orchard actions, Sapling spends,
@@ -953,6 +971,52 @@ public func pcztInfo(pcztData: Data) throws -> ZcashPcztInfo {
         saplingSpends: info.sapling_spends,
         transparentInputs: info.transparent_inputs,
         transparentOutputs: info.transparent_outputs
+    )
+}
+
+/// Extract recipient amount and fee information from a PCZT binary
+///
+/// The watch uses this to verify that the amount and fee shown in the approval
+/// UI match the actual PCZT bytes that will be signed.
+///
+/// - Parameters:
+///   - pcztData: Raw PCZT binary data
+///   - recipientAddress: Full recipient address shown by the phone
+///   - mainnet: Whether to parse addresses as mainnet (default true)
+/// - Returns: PCZT-derived amount, fee, and output counts
+public func pcztSummary(
+    pcztData: Data,
+    recipientAddress: String,
+    mainnet: Bool = true
+) throws -> ZcashPcztSummary {
+    var summary = ZsigPcztSummary()
+    let recipientBytes = Array(recipientAddress.utf8)
+
+    let result = pcztData.withUnsafeBytes { pcztPtr in
+        recipientBytes.withUnsafeBufferPointer { recipientPtr in
+            zsig_pczt_summary(
+                pcztPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                pcztData.count,
+                recipientPtr.baseAddress,
+                recipientBytes.count,
+                mainnet,
+                &summary
+            )
+        }
+    }
+
+    guard result.rawValue == 0 else {
+        throw ZcashSignerError(code: result.rawValue)
+    }
+
+    return ZcashPcztSummary(
+        recipientAmountZatoshis: summary.recipient_amount_zatoshis,
+        feeZatoshis: summary.fee_zatoshis,
+        matchedOutputs: summary.matched_outputs,
+        transparentOutputs: summary.transparent_outputs,
+        saplingOutputs: summary.sapling_outputs,
+        orchardOutputs: summary.orchard_outputs,
+        hasUnverifiedRecipientAmount: summary.has_unverified_recipient_amount
     )
 }
 
