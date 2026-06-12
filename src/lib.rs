@@ -73,13 +73,22 @@ static ALLOCATOR: allocator::LibcAllocator = allocator::LibcAllocator;
 #[cfg(all(not(feature = "std"), not(test)))]
 #[alloc_error_handler]
 fn alloc_error(_layout: core::alloc::Layout) -> ! {
-    loop {}
+    abort_process()
 }
 
 #[cfg(all(not(feature = "std"), not(test)))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
+    abort_process()
+}
+
+#[cfg(all(not(feature = "std"), not(test)))]
+fn abort_process() -> ! {
+    extern "C" {
+        fn abort() -> !;
+    }
+
+    unsafe { abort() }
 }
 
 // Android cdylib: even with panic=abort, no_std codegen may emit references to
