@@ -23,6 +23,7 @@ struct PCZTCli: ParsableCommand {
             BroadcastCommand.self,
             SendCommand.self,
             InspectCommand.self,
+            VerifySummaryCommand.self,
             TestUfvkCommand.self,
             CompareAddressCommand.self,
         ]

@@ -47,6 +47,9 @@ struct ShieldSubcommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Verbose output")
     var verbose: Bool = false
 
+    @Flag(name: .long, help: "Redact the PCZT for the signer (mirror the exact bytes the watch verifies + signs)")
+    var redact: Bool = false
+
     mutating func run() async throws {
         let config = try resolveConfig()
 
@@ -72,7 +75,13 @@ struct ShieldSubcommand: AsyncParsableCommand {
 
         // Immediately create PCZT from proposal
         errorOutput("[Propose] Creating PCZT from proposal...")
-        let pczt = try await wallet.createPCZT(from: proposal)
+        var pczt = try await wallet.createPCZT(from: proposal)
+
+        if redact {
+            let fullSize = pczt.count
+            pczt = try await wallet.redactForSigner(pczt)
+            errorOutput("[Propose] Redacted PCZT for signer: \(fullSize) -> \(pczt.count) bytes")
+        }
 
         await wallet.stop()
 
@@ -141,6 +150,9 @@ struct TransferSubcommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Verbose output")
     var verbose: Bool = false
 
+    @Flag(name: .long, help: "Redact the PCZT for the signer (mirror the exact bytes the watch verifies + signs)")
+    var redact: Bool = false
+
     mutating func run() async throws {
         let config = try resolveConfig()
 
@@ -167,7 +179,13 @@ struct TransferSubcommand: AsyncParsableCommand {
 
         // Immediately create PCZT from proposal
         errorOutput("[Propose] Creating PCZT from proposal...")
-        let pczt = try await wallet.createPCZT(from: proposal)
+        var pczt = try await wallet.createPCZT(from: proposal)
+
+        if redact {
+            let fullSize = pczt.count
+            pczt = try await wallet.redactForSigner(pczt)
+            errorOutput("[Propose] Redacted PCZT for signer: \(fullSize) -> \(pczt.count) bytes")
+        }
 
         await wallet.stop()
 

@@ -140,6 +140,13 @@ actor WalletManager {
         try await synchronizer.createPCZTFromProposal(accountUUID: accountUUID, proposal: proposal)
     }
 
+    /// Redact a PCZT down to what the external signer (the watch) needs.
+    /// This mirrors the phone's real flow, which sends the *redacted* PCZT to
+    /// the watch — the exact bytes the watch verifies (pczt_summary) and signs.
+    func redactForSigner(_ pczt: Data) async throws -> Data {
+        try await synchronizer.redactPCZTForSigner(pczt: pczt)
+    }
+
     func addProofs(to pczt: Data) async throws -> Data {
         try await synchronizer.addProofsToPCZT(pczt: pczt)
     }
