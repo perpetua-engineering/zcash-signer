@@ -868,6 +868,57 @@ ZsigError zsig_pczt_summary(const uint8_t* pczt_data,
                              ZsigPcztSummary* summary_out);
 
 /*
+ * PCZT ownership-totality + memo verdict returned by the CR-1337 verifiers.
+ *
+ * Closes the change/own-receiver diversion and memo display!=signed holes that
+ * zsig_pczt_summary cannot see: every output must be the approved recipient or
+ * provably wallet-owned (Orchard/Sapling IVK membership, owned transparent
+ * hash), and the recipient note memo is recovered from the signed ciphertext
+ * and compared to the approved memo.
+ */
+typedef struct {
+    uint64_t recipient_amount_zatoshis;
+    uint64_t fee_zatoshis;
+    uint32_t recipient_output_count;
+    uint32_t foreign_output_count;
+    bool all_outputs_accounted;  /* every output recipient-or-owned */
+    bool memo_matches;           /* recovered recipient memo == approved */
+    bool memo_checked;           /* a memo comparison was performed */
+    bool recipient_owned;        /* recipient is wallet-owned (ZEC-4 shielding) */
+} ZsigPcztVerdict;
+
+/*
+ * Verify PCZT output totality + memo binding using viewing keys derived from a
+ * raw seed (host/CLI/e2e; no Secure Enclave). The watch uses the _secure
+ * variant which keeps the seed in C/Rust.
+ *
+ * Parameters:
+ *   seed / seed_len:        BIP-39 seed bytes (32..252)
+ *   pczt_data / pczt_len:   Raw PCZT binary (max 1 MB)
+ *   recipient / recipient_len:  UTF-8 approved recipient address
+ *   expected_amount:        Approved recipient amount (zatoshi)
+ *   memo / memo_len:        UTF-8 approved memo (empty == no memo, max 512)
+ *   coin_type, account:     Derivation path components
+ *   mainnet:                true for mainnet address parsing
+ *   out:                    Receives the verdict (must not be NULL)
+ *
+ * Returns ZSIG_SUCCESS, or a ZsigError code on failure.
+ */
+ZsigError zsig_pczt_verify(const uint8_t* seed,
+                            size_t seed_len,
+                            const uint8_t* pczt_data,
+                            size_t pczt_len,
+                            const uint8_t* recipient,
+                            size_t recipient_len,
+                            uint64_t expected_amount,
+                            const uint8_t* memo,
+                            size_t memo_len,
+                            uint32_t coin_type,
+                            uint32_t account,
+                            bool mainnet,
+                            ZsigPcztVerdict* out);
+
+/*
  * Sign a PCZT binary with the provided keys
  *
  * Parses the PCZT, signs all applicable spend types using the provided
@@ -949,6 +1000,33 @@ int32_t zsig_pczt_sign_secure(const uint8_t* encrypted_mnemonic,
                                uint32_t account,
                                uint8_t** out_signed_pczt,
                                size_t* out_len);
+
+/*
+ * Verify PCZT output totality + memo binding (CR-1337) using viewing keys
+ * derived inside the secure boundary from the SE-encrypted mnemonic. The seed
+ * is decrypted, viewing keys derived, the verdict computed, and all key
+ * material zeroized before return. The watch refuses to sign on a verdict that
+ * reports a foreign output (diversion), an unowned shielding recipient (ZEC-4),
+ * or a memo mismatch.
+ *
+ * Parameters mirror zsig_pczt_sign_secure plus the approved recipient/amount/
+ * memo and an output verdict. Returns ZSIG_SUCCESS (0) or a ZsigError code.
+ */
+int32_t zsig_pczt_verify_secure(const uint8_t* encrypted_mnemonic,
+                                 size_t encrypted_mnemonic_len,
+                                 const void* se_key_ref,
+                                 const char* hkdf_salt,
+                                 const uint8_t* pczt_data,
+                                 size_t pczt_len,
+                                 const uint8_t* recipient,
+                                 size_t recipient_len,
+                                 uint64_t expected_amount,
+                                 const uint8_t* memo,
+                                 size_t memo_len,
+                                 uint32_t coin_type,
+                                 uint32_t account,
+                                 bool mainnet,
+                                 ZsigPcztVerdict* out);
 
 /*
  * Free a heap-allocated buffer returned by zsig_pczt_sign_secure.

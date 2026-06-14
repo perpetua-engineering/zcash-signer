@@ -11,6 +11,8 @@
 use alloc::vec::Vec;
 use core::{convert::Infallible, fmt, str};
 
+use ff::PrimeField;
+
 use pczt::roles::signer::Signer;
 use zcash_address::{
     unified::{Container, Receiver},
@@ -94,7 +96,33 @@ pub struct PcztSigningKeys<'a> {
 /// The full ExpandedSpendingKey is 96 bytes (ask || nsk || ovk), but for
 /// signing we only need ask. We pad nsk and ovk with zeros — they're not
 /// used during PCZT signing.
+///
+/// CR-1337 (gap 4): we MUST reject a malformed ask here. `sapling-crypto`'s
+/// `SpendAuthorizingKey::from_bytes` evaluates `redjubjub::SigningKey::try_from(b)
+/// .expect(...)` *eagerly*, before its own `!is_zero()` guard. `redjubjub`
+/// rejects the zero scalar (and any non-canonical encoding) that `jubjub`
+/// accepts, so a zero/malformed ask drives that `.expect()` to panic — and the
+/// device build is `panic = "abort"`, i.e. a crash. Validating the ask is a
+/// non-zero canonical Jubjub scalar before we ever hand it to the signer turns
+/// that crash into a clean `InvalidSaplingKey`. On the production secure path
+/// the ask is SE-derived and always valid, so this never rejects a real key.
+///
+/// Adversarial-`alpha` note: the re-randomization `rsk = ask.randomize(&alpha)`
+/// (with attacker-influenced `alpha` from the PCZT) computes `rsk = ask + alpha`
+/// by direct scalar addition and builds the `SigningKey` from the sum WITHOUT
+/// the panicking `try_from`/`.expect` path. So a chosen `alpha` cannot reach the
+/// malformed-key panic even though it perturbs the signing scalar; the only
+/// degenerate sum (`rsk == 0`, i.e. `alpha == -ask`) needs the secret `ask` and
+/// merely yields a useless zero key that still signs without aborting. Guarding
+/// the base `ask` is therefore sufficient.
 fn sapling_esk_from_ask(ask_bytes: &[u8; 32]) -> Result<SaplingExpandedSpendingKey, PcztSignError> {
+    // Reject anything redjubjub would reject (non-canonical or zero), fail-closed.
+    let scalar = Option::<jubjub::Fr>::from(jubjub::Fr::from_repr(*ask_bytes))
+        .ok_or(PcztSignError::InvalidSaplingKey)?;
+    if bool::from(ff::Field::is_zero(&scalar)) {
+        return Err(PcztSignError::InvalidSaplingKey);
+    }
+
     let mut esk_bytes = [0u8; 96];
     esk_bytes[..32].copy_from_slice(ask_bytes);
     // nsk = 0 (valid Jubjub scalar), ovk = 0 (arbitrary 32 bytes)
@@ -340,22 +368,22 @@ pub struct PcztSummary {
 }
 
 #[derive(Default)]
-struct RecipientReceivers {
-    p2pkh: Option<[u8; 20]>,
-    p2sh: Option<[u8; 20]>,
-    sapling: Option<[u8; 43]>,
-    orchard: Option<[u8; 43]>,
+pub(crate) struct RecipientReceivers {
+    pub(crate) p2pkh: Option<[u8; 20]>,
+    pub(crate) p2sh: Option<[u8; 20]>,
+    pub(crate) sapling: Option<[u8; 43]>,
+    pub(crate) orchard: Option<[u8; 43]>,
 }
 
 impl RecipientReceivers {
-    fn parse(encoded: &str, network: NetworkType) -> Result<Self, PcztSignError> {
+    pub(crate) fn parse(encoded: &str, network: NetworkType) -> Result<Self, PcztSignError> {
         ZcashAddress::try_from_encoded(encoded)
             .map_err(|_| PcztSignError::InvalidRecipientAddress)?
             .convert_if_network(network)
             .map_err(|_| PcztSignError::InvalidRecipientAddress)
     }
 
-    fn matches_transparent_script(&self, script: &[u8]) -> bool {
+    pub(crate) fn matches_transparent_script(&self, script: &[u8]) -> bool {
         match script {
             [0x76, 0xa9, 0x14, hash @ .., 0x88, 0xac] if hash.len() == 20 => {
                 self.p2pkh.as_ref().is_some_and(|expected| expected == hash)

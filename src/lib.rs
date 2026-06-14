@@ -21,6 +21,8 @@ mod diversifier;
 mod keys;
 #[cfg(feature = "pczt-signer")]
 pub mod pczt_signer;
+#[cfg(feature = "pczt-signer")]
+pub mod pczt_verify;
 #[cfg(feature = "secure-signer")]
 mod secure_derive;
 #[cfg(feature = "secure-signer")]

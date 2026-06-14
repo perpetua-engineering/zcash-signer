@@ -1157,6 +1157,143 @@ public func pcztSignSecure(
     return signedPczt
 }
 
+// MARK: - PCZT Ownership Totality + Memo Verification (CR-1337)
+
+/// Result of the CR-1337 ownership-totality + memo verification.
+///
+/// `zsig_pczt_summary` only checks the approved recipient's amount + the net
+/// fee, so it cannot detect a diverted change/own-receiver output or a
+/// display!=signed memo. This verdict, computed with the wallet's viewing keys,
+/// proves every output is the recipient or wallet-owned and binds the memo.
+public struct ZcashPcztVerdict {
+    public let recipientAmountZatoshis: UInt64
+    public let feeZatoshis: UInt64
+    public let recipientOutputCount: UInt32
+    /// Outputs that are neither the recipient nor wallet-owned. > 0 ⇒ REFUSE.
+    public let foreignOutputCount: UInt32
+    /// Every output is the approved recipient or provably wallet-owned.
+    public let allOutputsAccounted: Bool
+    /// The recovered recipient memo equals the approved memo.
+    public let memoMatches: Bool
+    /// A memo comparison was performed (recipient memo recoverable).
+    public let memoChecked: Bool
+    /// The approved recipient is itself wallet-owned (ZEC-4 shielding gate).
+    public let recipientOwned: Bool
+}
+
+private func makeVerdict(_ v: ZsigPcztVerdict) -> ZcashPcztVerdict {
+    ZcashPcztVerdict(
+        recipientAmountZatoshis: v.recipient_amount_zatoshis,
+        feeZatoshis: v.fee_zatoshis,
+        recipientOutputCount: v.recipient_output_count,
+        foreignOutputCount: v.foreign_output_count,
+        allOutputsAccounted: v.all_outputs_accounted,
+        memoMatches: v.memo_matches,
+        memoChecked: v.memo_checked,
+        recipientOwned: v.recipient_owned
+    )
+}
+
+/// Verify PCZT output totality + memo binding using viewing keys derived from a
+/// raw seed (host/CLI/e2e use; the watch uses `pcztVerifySecure`).
+public func pcztVerify(
+    seed: Data,
+    pcztData: Data,
+    recipientAddress: String,
+    expectedAmount: UInt64,
+    memo: String,
+    coinType: UInt32,
+    account: UInt32,
+    mainnet: Bool = true
+) throws -> ZcashPcztVerdict {
+    var verdict = ZsigPcztVerdict()
+    let recipientBytes = Array(recipientAddress.utf8)
+    let memoBytes = Array(memo.utf8)
+
+    let result = seed.withUnsafeBytes { seedPtr in
+        pcztData.withUnsafeBytes { pcztPtr in
+            recipientBytes.withUnsafeBufferPointer { recipientPtr in
+                memoBytes.withUnsafeBufferPointer { memoPtr in
+                    zsig_pczt_verify(
+                        seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        seed.count,
+                        pcztPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        pcztData.count,
+                        recipientPtr.baseAddress,
+                        recipientBytes.count,
+                        expectedAmount,
+                        memoPtr.baseAddress,
+                        memoBytes.count,
+                        coinType,
+                        account,
+                        mainnet,
+                        &verdict
+                    )
+                }
+            }
+        }
+    }
+
+    guard result.rawValue == 0 else {
+        throw ZcashSignerError(code: result.rawValue)
+    }
+    return makeVerdict(verdict)
+}
+
+/// Verify PCZT output totality + memo binding using viewing keys derived inside
+/// the secure boundary from the SE-encrypted mnemonic (the watch's path). The
+/// seed never appears in Swift memory.
+public func pcztVerifySecure(
+    encryptedMnemonic: Data,
+    seKeyRef: SecKey,
+    hkdfSalt: String,
+    pcztData: Data,
+    recipientAddress: String,
+    expectedAmount: UInt64,
+    memo: String,
+    coinType: UInt32,
+    account: UInt32,
+    mainnet: Bool = true
+) throws -> ZcashPcztVerdict {
+    var verdict = ZsigPcztVerdict()
+    let recipientBytes = Array(recipientAddress.utf8)
+    let memoBytes = Array(memo.utf8)
+
+    let result = encryptedMnemonic.withUnsafeBytes { mnemonicPtr in
+        pcztData.withUnsafeBytes { pcztPtr in
+            hkdfSalt.withCString { saltPtr in
+                recipientBytes.withUnsafeBufferPointer { recipientPtr in
+                    memoBytes.withUnsafeBufferPointer { memoPtr in
+                        let seKeyRawPtr = Unmanaged.passUnretained(seKeyRef).toOpaque()
+                        return zsig_pczt_verify_secure(
+                            mnemonicPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                            encryptedMnemonic.count,
+                            seKeyRawPtr,
+                            saltPtr,
+                            pcztPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                            pcztData.count,
+                            recipientPtr.baseAddress,
+                            recipientBytes.count,
+                            expectedAmount,
+                            memoPtr.baseAddress,
+                            memoBytes.count,
+                            coinType,
+                            account,
+                            mainnet,
+                            &verdict
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    guard result == 0 else {
+        throw ZcashSignerError(code: UInt32(bitPattern: result))
+    }
+    return makeVerdict(verdict)
+}
+
 // MARK: - Secure Address/Key Derivation (SE-encrypted mnemonic, seed never in Swift)
 
 /// Derive Orchard unified address from SE-encrypted mnemonic.

@@ -17,6 +17,9 @@
 use pczt::roles::creator::Creator;
 use zcash_protocol::consensus::{BranchId, NetworkType};
 use zcash_signer::pczt_signer::{pczt_info, pczt_summary, sign_pczt, PcztSigningKeys};
+use zcash_signer::pczt_verify::{
+    derive_wallet_viewing_keys, pczt_verify, ApprovedTx, WalletViewingKeys,
+};
 
 /// Deterministic xorshift64* PRNG — reproducible, no external deps.
 struct Rng(u64);
@@ -74,36 +77,78 @@ fn networks() -> [NetworkType; 2] {
     [NetworkType::Main, NetworkType::Test]
 }
 
+/// A deterministic 64-byte seed so the key-bearing branches exercise *valid*
+/// SE-style derived keys (the production path only ever signs with valid,
+/// seed-derived keys), and the ownership verifier runs against real viewing
+/// keys. CR-1337 (gap 5).
+const FUZZ_SEED: [u8; 64] = [0x5A; 64];
+
+/// Build the SE-style signing keys (valid Orchard sk, plus a *zero* Sapling ask
+/// to keep exercising the gap-4 malformed-key guard) for the key-bearing fuzz.
+fn fuzz_signing_keys<'a>(orchard_sk: &'a [u8; 32], zero_sapling: &'a [u8; 32]) -> PcztSigningKeys<'a> {
+    PcztSigningKeys {
+        orchard_sk: Some(orchard_sk),
+        sapling_ask: Some(zero_sapling),
+        transparent_sk: None,
+    }
+}
+
 /// Drive every attacker-controlled entrypoint over a byte buffer. Any panic
 /// fails the test; the return values themselves are not asserted (random bytes
 /// legitimately produce either `Ok` or `Err`) — the contract under test is
 /// "terminates without panicking".
 ///
-/// `sign_pczt` is exercised with no caller keys: that drives the full
-/// parse -> `Signer::new` -> `finish` pipeline over the attacker bytes, which
-/// is the realistic threat surface. The watch never signs with
-/// attacker-supplied keys — signing keys are always SE-derived from the seed,
-/// so fuzzing the key-bearing branches with arbitrary key bytes would only
-/// model an input the production path cannot produce.
-fn exercise(bytes: &[u8], rng: &mut Rng) {
+/// We exercise `sign_pczt` both with no keys (the full parse -> `Signer::new` ->
+/// `finish` pipeline) and with key-bearing branches: a valid SE-derived Orchard
+/// spending key (the realistic production input) plus a zero Sapling ask, which
+/// keeps the CR-1337 gap-4 malformed-ask guard under continuous fuzz. `pczt_verify`
+/// (CR-1337) is driven over the same bytes with real viewing keys derived from a
+/// fixed seed.
+fn exercise(bytes: &[u8], rng: &mut Rng, keys: &WalletViewingKeys, orchard_sk: &[u8; 32]) {
     let _ = pczt_info(bytes);
     let _ = sign_pczt(bytes, &no_signing_keys());
+
+    // Key-bearing path: valid Orchard sk + zero Sapling ask. Must not panic;
+    // the zero ask must surface as a clean error, never an abort.
+    let zero_sapling = [0u8; 32];
+    let _ = sign_pczt(bytes, &fuzz_signing_keys(orchard_sk, &zero_sapling));
 
     // Vary the recipient + network so the summary decoder's address-matching
     // branches are exercised against the same (often malformed) PCZT bytes.
     let recipient = RECIPIENTS[(rng.next_u64() as usize) % RECIPIENTS.len()];
     let network = networks()[(rng.next_u64() as usize) % networks().len()];
     let _ = pczt_summary(bytes, recipient, network);
+
+    // Ownership-totality + memo verifier over attacker bytes with real keys.
+    let memo = if rng.next_u64() & 1 == 0 { "" } else { "memo" };
+    let approved = ApprovedTx {
+        recipient_address: recipient,
+        expected_amount_zatoshis: rng.next_u64(),
+        expected_memo: memo,
+        network,
+    };
+    let _ = pczt_verify(bytes, &approved, keys);
+}
+
+/// Derive the fuzz keys once (key derivation is comparatively expensive).
+fn fuzz_keys() -> (WalletViewingKeys, [u8; 32]) {
+    let viewing = derive_wallet_viewing_keys(&FUZZ_SEED, 133, 0);
+    // A valid Orchard spending key the signer accepts: reuse the same FVK seed.
+    // `derive_wallet_viewing_keys` proves the seed yields a valid Orchard key,
+    // so a fixed non-zero sk array suffices for the signer's `from_bytes`.
+    let orchard_sk = [0x42u8; 32];
+    (viewing, orchard_sk)
 }
 
 #[test]
 fn entrypoints_survive_random_bytes() {
+    let (keys, orchard_sk) = fuzz_keys();
     let mut rng = Rng::new(0xC0FF_EE12_3456_789A);
     // Cap length generously above realistic small PCZTs while staying cheap.
     for _ in 0..20_000 {
         let len = rng.next_len(512);
         let bytes = rng.fill(len);
-        exercise(&bytes, &mut rng);
+        exercise(&bytes, &mut rng, &keys, &orchard_sk);
     }
 }
 
@@ -116,12 +161,13 @@ fn entrypoints_survive_pczt_magic_prefixed_garbage() {
         .serialize();
     let prefix = &magic[..magic.len().min(8)];
 
+    let (keys, orchard_sk) = fuzz_keys();
     let mut rng = Rng::new(0x1234_5678_9ABC_DEF0);
     for _ in 0..20_000 {
         let mut bytes = prefix.to_vec();
         let tail_len = rng.next_len(256);
         bytes.extend(rng.fill(tail_len));
-        exercise(&bytes, &mut rng);
+        exercise(&bytes, &mut rng, &keys, &orchard_sk);
     }
 }
 
@@ -135,6 +181,7 @@ fn entrypoints_survive_bit_flipped_valid_pczt() {
         .serialize();
     assert!(pczt_info(&valid).is_ok(), "baseline PCZT must parse");
 
+    let (keys, orchard_sk) = fuzz_keys();
     let mut rng = Rng::new(0x0BAD_F00D_DEAD_BEEF);
     for _ in 0..20_000 {
         let mut bytes = valid.clone();
@@ -162,17 +209,18 @@ fn entrypoints_survive_bit_flipped_valid_pczt() {
                 }
             }
         }
-        exercise(&bytes, &mut rng);
+        exercise(&bytes, &mut rng, &keys, &orchard_sk);
     }
 }
 
 #[test]
 fn empty_and_tiny_buffers_are_handled() {
+    let (keys, orchard_sk) = fuzz_keys();
     let mut rng = Rng::new(0xFEED_FACE_CAFE_BABE);
     for len in 0..=8usize {
         let bytes = vec![0u8; len];
-        exercise(&bytes, &mut rng);
+        exercise(&bytes, &mut rng, &keys, &orchard_sk);
         let noisy = rng.fill(len);
-        exercise(&noisy, &mut rng);
+        exercise(&noisy, &mut rng, &keys, &orchard_sk);
     }
 }

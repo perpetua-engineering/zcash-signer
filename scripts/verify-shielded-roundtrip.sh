@@ -61,12 +61,45 @@ RECIPIENT_UA="${RECIPIENT_UA:-$OWN_UA}"
 echo "   own UA:             $OWN_UA" >&2
 echo "   transfer recipient: $RECIPIENT_UA" >&2
 
-echo "== TRANSFER (shielded), redact for signer, verify watch summary ==" >&2
+# verify-summary auto-runs the CR-1337 viewing-key ownership totality + memo
+# check whenever ZCASH_SEED is set (which it is here), so each verify below
+# exercises BOTH the amount/fee summary AND the change/own-receiver totality on
+# the exact redacted bytes the watch signs. A legitimate redacted PCZT must
+# PASS: its change output is wallet-owned, so all_outputs_accounted == true (the
+# P0 "can't send ZEC" regression guard).
+echo "== TRANSFER (shielded), redact for signer, verify watch summary + totality ==" >&2
 XFER_PCZT="$("$BIN" propose transfer "$RECIPIENT_UA" "$XFER_AMOUNT" --redact --network "$NET" | jqua pcztFile)"
 "$BIN" verify-summary "$XFER_PCZT" --recipient "$RECIPIENT_UA" --network "$NET" --expect-amount "$XFER_AMOUNT"
 
-echo "== SHIELD (t->z), redact for signer, verify watch summary ==" >&2
+echo "== SHIELD (t->z), redact for signer, verify watch summary + totality + ZEC-4 ==" >&2
 SHIELD_PCZT="$("$BIN" propose shield "$SHIELD_THRESHOLD" --redact --network "$NET" | jqua pcztFile)"
-"$BIN" verify-summary "$SHIELD_PCZT" --recipient "$OWN_UA" --network "$NET"
+# --shielding: the destination must be wallet-owned (ZEC-4). For a real shield
+# the output is our own Orchard receiver, so this must PASS.
+"$BIN" verify-summary "$SHIELD_PCZT" --recipient "$OWN_UA" --network "$NET" --shielding
 
-echo "== ALL VERIFIED OK — redacted shielded PCZTs pass the watch display==signed check. No broadcast performed. ==" >&2
+# ── Adversarial negatives: the verifier MUST refuse these (exit non-zero). ────
+# A bash helper that inverts the exit code: succeeds only if verify-summary fails.
+expect_refusal() {
+  local label="$1"; shift
+  if "$@" >/dev/null 2>&1; then
+    echo "!! SECURITY REGRESSION: verifier ACCEPTED $label (expected refusal)" >&2
+    exit 1
+  fi
+  echo "   correctly REFUSED: $label" >&2
+}
+
+echo "== Adversarial: display!=signed memo on the transfer note must be REFUSED ==" >&2
+expect_refusal "altered memo (display says 'attacker', note has none)" \
+  "$BIN" verify-summary "$XFER_PCZT" --recipient "$RECIPIENT_UA" --network "$NET" \
+    --expect-amount "$XFER_AMOUNT" --memo "attacker"
+
+echo "== Adversarial: a transfer falsely framed as shielding (ZEC-4) is REFUSED iff recipient is foreign ==" >&2
+if [[ "$RECIPIENT_UA" != "$OWN_UA" ]]; then
+  expect_refusal "external recipient framed as shielding self-send" \
+    "$BIN" verify-summary "$XFER_PCZT" --recipient "$RECIPIENT_UA" --network "$NET" \
+      --expect-amount "$XFER_AMOUNT" --shielding
+else
+  echo "   (skipped: self-send default — set RECIPIENT_UA to an external UA to exercise)" >&2
+fi
+
+echo "== ALL VERIFIED OK — redacted shielded PCZTs pass display==signed + ownership totality; adversarial mutations refused. No broadcast performed. ==" >&2

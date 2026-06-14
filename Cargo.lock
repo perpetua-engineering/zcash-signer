@@ -1541,6 +1541,7 @@ dependencies = [
  "sha2 0.10.9",
  "sinsemilla",
  "zcash_address",
+ "zcash_note_encryption",
  "zcash_protocol",
  "zcash_transparent",
  "zeroize",

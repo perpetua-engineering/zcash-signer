@@ -107,6 +107,88 @@ fn pczt_sign_secure(
 }
 
 // -----------------------------------------------------------------------------
+// Secure PCZT ownership-totality + memo verification (CR-1337)
+// -----------------------------------------------------------------------------
+
+/// Verify PCZT output totality + memo binding (CR-1337) using viewing keys
+/// derived inside the secure boundary from the SE-encrypted mnemonic. The seed
+/// is decrypted, viewing keys derived, the verdict computed, and all key
+/// material zeroized before return. The watch refuses to sign on a verdict that
+/// reports a foreign output or a memo mismatch.
+///
+/// # Safety
+/// - `encrypted_mnemonic` must point to `encrypted_mnemonic_len` readable bytes
+/// - `se_key_ref` is an opaque pointer passed through to wallet-core
+/// - `hkdf_salt` must be a null-terminated C string
+/// - `pczt_data` must point to `pczt_len` readable bytes
+/// - `recipient`/`memo` if non-null point to readable UTF-8 of the given lengths
+/// - `out` must point to a writable `ZsigPcztVerdict`
+#[no_mangle]
+pub unsafe extern "C" fn zsig_pczt_verify_secure(
+    encrypted_mnemonic: *const u8,
+    encrypted_mnemonic_len: usize,
+    se_key_ref: *const c_void,
+    hkdf_salt: *const c_char,
+    pczt_data: *const u8,
+    pczt_len: usize,
+    recipient: *const u8,
+    recipient_len: usize,
+    expected_amount: u64,
+    memo: *const u8,
+    memo_len: usize,
+    coin_type: u32,
+    account: u32,
+    mainnet: bool,
+    out: *mut crate::pczt_verify::ZsigPcztVerdict,
+) -> i32 {
+    use crate::pczt_verify::{
+        decode_str, derive_wallet_viewing_keys, verify_ffi_common, MAX_MEMO_LEN, MAX_PCZT_LEN,
+    };
+
+    if encrypted_mnemonic.is_null() || hkdf_salt.is_null() || pczt_data.is_null() || out.is_null() {
+        return ZsigError::NullPointer as i32;
+    }
+    if encrypted_mnemonic_len == 0 {
+        return ZsigError::InvalidSeed as i32;
+    }
+    if pczt_len == 0 || pczt_len > MAX_PCZT_LEN {
+        return ZsigError::BufferTooSmall as i32;
+    }
+    if memo_len > MAX_MEMO_LEN {
+        return ZsigError::BufferTooSmall as i32;
+    }
+
+    let enc_slice = slice::from_raw_parts(encrypted_mnemonic, encrypted_mnemonic_len);
+    let pczt_bytes = slice::from_raw_parts(pczt_data, pczt_len);
+    let Some(recipient_str) = decode_str(recipient, recipient_len) else {
+        return ZsigError::PcztParseFailed as i32;
+    };
+    let Some(memo_str) = decode_str(memo, memo_len) else {
+        return ZsigError::PcztParseFailed as i32;
+    };
+    if recipient_str.is_empty() {
+        return ZsigError::PcztParseFailed as i32;
+    }
+
+    let seed = match derive_seed_secure(enc_slice, se_key_ref, hkdf_salt) {
+        Ok(s) => s,
+        Err(e) => return e as i32,
+    };
+    let keys = derive_wallet_viewing_keys(&*seed, coin_type, account);
+    drop(seed); // zeroizes
+
+    verify_ffi_common(
+        pczt_bytes,
+        recipient_str,
+        expected_amount,
+        memo_str,
+        mainnet,
+        &keys,
+        out,
+    ) as i32
+}
+
+// -----------------------------------------------------------------------------
 // C FFI
 // -----------------------------------------------------------------------------
 

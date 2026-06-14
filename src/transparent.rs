@@ -217,6 +217,39 @@ pub(crate) fn derive_transparent_sk(seed: &[u8], coin_type: u32, account: u32) -
     Some(new_sk)
 }
 
+/// Derive the transparent P2PKH pubkey hash (hash160) at
+/// `m/44'/coin_type'/account'/change/index`.
+///
+/// `change` selects the external (0) or internal/change (1) chain. Used by the
+/// PCZT ownership verifier to recognise wallet-owned transparent outputs.
+pub(crate) fn derive_transparent_p2pkh_hash(
+    seed: &[u8],
+    coin_type: u32,
+    account: u32,
+    change: u32,
+    index: u32,
+) -> Option<[u8; 20]> {
+    let (mut sk, mut cc) = bip32_master_key(seed);
+
+    let (s, c) = bip32_derive_hardened(&sk, &cc, 44 | 0x80000000)?;
+    sk = s;
+    cc = c;
+    let (s, c) = bip32_derive_hardened(&sk, &cc, coin_type | 0x80000000)?;
+    sk = s;
+    cc = c;
+    let (s, c) = bip32_derive_hardened(&sk, &cc, account | 0x80000000)?;
+    sk = s;
+    cc = c;
+    let (s, c) = bip32_derive_normal(&sk, &cc, change)?;
+    sk = s;
+    cc = c;
+    let (s, _) = bip32_derive_normal(&sk, &cc, index)?;
+    sk = s;
+
+    let pubkey = derive_secp256k1_pubkey(&sk)?;
+    Some(pubkey_hash160(&pubkey))
+}
+
 // -----------------------------------------------------------------------------
 // FFI Functions
 // -----------------------------------------------------------------------------

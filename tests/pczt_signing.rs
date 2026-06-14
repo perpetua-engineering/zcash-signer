@@ -49,6 +49,39 @@ fn sign_pczt_handles_parseable_pczt_without_spends() {
 }
 
 #[test]
+fn sign_pczt_rejects_malformed_sapling_ask_without_panicking() {
+    // CR-1337 gap 4: a zero (or non-canonical) Sapling ask used to panic
+    // (abort) deep in sapling-crypto's eager `redjubjub::SigningKey::try_from`.
+    // It must now return `InvalidSaplingKey` cleanly. `sapling_esk_from_ask`
+    // runs whenever a Sapling key is supplied, independent of spend count, so an
+    // empty creator PCZT exercises the validation.
+    let pczt = empty_pczt_bytes();
+
+    let zero_ask = [0u8; 32];
+    let keys = PcztSigningKeys {
+        orchard_sk: None,
+        sapling_ask: Some(&zero_ask),
+        transparent_sk: None,
+    };
+    assert!(matches!(
+        sign_pczt(&pczt, &keys),
+        Err(PcztSignError::InvalidSaplingKey)
+    ));
+
+    // 0xFF..FF is a non-canonical Jubjub scalar encoding (> modulus).
+    let noncanonical_ask = [0xFFu8; 32];
+    let keys = PcztSigningKeys {
+        orchard_sk: None,
+        sapling_ask: Some(&noncanonical_ask),
+        transparent_sk: None,
+    };
+    assert!(matches!(
+        sign_pczt(&pczt, &keys),
+        Err(PcztSignError::InvalidSaplingKey)
+    ));
+}
+
+#[test]
 fn pczt_entrypoints_reject_malformed_inputs_without_panicking() {
     let cases: &[&[u8]] = &[
         b"",
