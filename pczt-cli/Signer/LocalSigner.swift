@@ -14,6 +14,7 @@ import ZcashSignerCore
 struct LocalSigner {
     let orchardSpendingKey: Data
     let saplingAsk: Data
+    let transparentSecretKey: Data
 
     /// Initialize from a BIP-39 seed, deriving all required keys.
     init(seed: Data, account: UInt32 = 0, mainnet: Bool = true) throws {
@@ -32,6 +33,18 @@ struct LocalSigner {
             account: account
         )
         self.saplingAsk = sask.bytes
+
+        let (transparentIndex, _) = try deriveFirstValidDiversifierIndex(
+            seed: seed,
+            coinType: coinType,
+            account: account
+        )
+        self.transparentSecretKey = try deriveTransparentSecretKey(
+            seed: seed,
+            coinType: coinType,
+            account: account,
+            index: UInt32(transparentIndex)
+        )
     }
 
     /// Sign a raw PCZT binary using the full Signer role.
@@ -41,7 +54,7 @@ struct LocalSigner {
             pcztData: pcztData,
             orchardSpendingKey: orchardSpendingKey,
             saplingAsk: saplingAsk,
-            transparentSecretKey: nil
+            transparentSecretKey: transparentSecretKey
         )
     }
 }

@@ -448,6 +448,35 @@ public func deriveTransparentPubkeyHash(
     return Data(hash)
 }
 
+/// Derive the transparent secret key (32 bytes) used for PCZT transparent input
+/// signing. Host tooling uses this to mirror the watch secure signer; app code
+/// should keep using `pcztSignSecure`.
+public func deriveTransparentSecretKey(
+    seed: Data,
+    coinType: UInt32 = ZSIG_MAINNET_COIN_TYPE,
+    account: UInt32 = 0,
+    index: UInt32 = 0
+) throws -> Data {
+    var key = [UInt8](repeating: 0, count: 32)
+
+    let result = seed.withUnsafeBytes { seedPtr in
+        zsig_derive_transparent_secret_key(
+            seedPtr.baseAddress?.assumingMemoryBound(to: UInt8.self),
+            seed.count,
+            coinType,
+            account,
+            index,
+            &key
+        )
+    }
+
+    guard result.rawValue == 0 else {
+        throw ZcashSignerError(code: result.rawValue)
+    }
+
+    return Data(key)
+}
+
 // MARK: - Transparent Signing
 
 /// Sign a transparent input using BIP-44 derived key (secp256k1/ECDSA)
@@ -1167,6 +1196,7 @@ public func pcztSignSecure(
 /// proves every output is the recipient or wallet-owned and binds the memo.
 public struct ZcashPcztVerdict {
     public let recipientAmountZatoshis: UInt64
+    public let walletOwnedOutputAmountZatoshis: UInt64
     public let feeZatoshis: UInt64
     public let recipientOutputCount: UInt32
     /// Outputs that are neither the recipient nor wallet-owned. > 0 ⇒ REFUSE.
@@ -1184,6 +1214,7 @@ public struct ZcashPcztVerdict {
 private func makeVerdict(_ v: ZsigPcztVerdict) -> ZcashPcztVerdict {
     ZcashPcztVerdict(
         recipientAmountZatoshis: v.recipient_amount_zatoshis,
+        walletOwnedOutputAmountZatoshis: v.wallet_owned_output_amount_zatoshis,
         feeZatoshis: v.fee_zatoshis,
         recipientOutputCount: v.recipient_output_count,
         foreignOutputCount: v.foreign_output_count,

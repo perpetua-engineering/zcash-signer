@@ -20,6 +20,7 @@ struct PCZTCli: ParsableCommand {
             ProposeCommand.self,
             SignCommand.self,
             ProveCommand.self,
+            RedactCommand.self,
             BroadcastCommand.self,
             SendCommand.self,
             InspectCommand.self,

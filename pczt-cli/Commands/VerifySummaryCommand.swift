@@ -60,17 +60,19 @@ struct VerifySummaryCommand: AsyncParsableCommand {
 
         // Mirror the watch's fail-closed guards (ZecSigningHandler.verifyPcztSummary).
         var failures: [String] = []
-        if summary.hasUnverifiedRecipientAmount {
-            failures.append(
-                "recipient amount NOT verifiable from the PCZT — receiver bytes didn't match "
-                + "(this is exactly the failure mode if redactPCZTForSigner strips output recipient/value). The watch would REJECT."
-            )
-        }
-        if summary.matchedOutputs == 0 {
-            failures.append("no PCZT output matches the approved recipient — the watch would REJECT.")
-        }
-        if let expect = expectAmount, summary.recipientAmountZatoshis != expect {
-            failures.append("amount mismatch: PCZT=\(summary.recipientAmountZatoshis) approved=\(expect)")
+        if !shielding {
+            if summary.hasUnverifiedRecipientAmount {
+                failures.append(
+                    "recipient amount NOT verifiable from the PCZT — receiver bytes didn't match "
+                    + "(this is exactly the failure mode if redactPCZTForSigner strips output recipient/value). The watch would REJECT."
+                )
+            }
+            if summary.matchedOutputs == 0 {
+                failures.append("no PCZT output matches the approved recipient — the watch would REJECT.")
+            }
+            if let expect = expectAmount, summary.recipientAmountZatoshis != expect {
+                failures.append("amount mismatch: PCZT=\(summary.recipientAmountZatoshis) approved=\(expect)")
+            }
         }
         if let expect = expectFee, summary.feeZatoshis != expect {
             failures.append("fee mismatch: PCZT=\(summary.feeZatoshis) approved=\(expect)")
@@ -100,6 +102,7 @@ struct VerifySummaryCommand: AsyncParsableCommand {
             print("  foreign_output_count:            \(verdict.foreignOutputCount)")
             print("  all_outputs_accounted:           \(verdict.allOutputsAccounted)")
             print("  recipient_amount_zatoshis:       \(verdict.recipientAmountZatoshis)")
+            print("  wallet_owned_output_amount:      \(verdict.walletOwnedOutputAmountZatoshis)")
             print("  memo_checked / memo_matches:     \(verdict.memoChecked) / \(verdict.memoMatches)")
             print("  recipient_owned:                 \(verdict.recipientOwned)")
 
@@ -109,8 +112,20 @@ struct VerifySummaryCommand: AsyncParsableCommand {
                     + "recipient nor wallet-owned — a diverted change/own-receiver output. The watch would REJECT."
                 )
             }
-            if verdict.recipientOutputCount == 0 {
-                failures.append("totality decode found no recipient output — the watch would REJECT.")
+            if let expect = expectFee, verdict.feeZatoshis != expect {
+                failures.append("totality fee mismatch: PCZT=\(verdict.feeZatoshis) approved=\(expect)")
+            }
+            if shielding {
+                if let expect = expectAmount, verdict.walletOwnedOutputAmountZatoshis != expect {
+                    failures.append("shielding amount mismatch: wallet-owned output=\(verdict.walletOwnedOutputAmountZatoshis) approved=\(expect)")
+                }
+            } else {
+                if verdict.recipientOutputCount == 0 {
+                    failures.append("totality decode found no recipient output — the watch would REJECT.")
+                }
+                if verdict.recipientAmountZatoshis != expectedAmount {
+                    failures.append("totality amount mismatch: PCZT=\(verdict.recipientAmountZatoshis) approved=\(expectedAmount)")
+                }
             }
             if !memo.isEmpty, !(verdict.memoChecked && verdict.memoMatches) {
                 failures.append("memo display!=signed: approved memo not bound to the recipient note. The watch would REJECT.")

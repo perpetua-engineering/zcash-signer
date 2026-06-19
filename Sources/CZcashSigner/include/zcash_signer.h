@@ -466,6 +466,19 @@ ZsigError zsig_derive_transparent_pubkey_hash(const uint8_t* seed,
                                                uint32_t index,
                                                uint8_t* hash_out);
 
+/*
+ * Derive transparent secret key (32 bytes) from seed.
+ *
+ * Path: m/44'/coin_type'/account'/0/0. This is intended for host-side tooling;
+ * the watch production path derives the same key inside zsig_pczt_sign_secure.
+ */
+ZsigError zsig_derive_transparent_secret_key(const uint8_t* seed,
+                                              size_t seed_len,
+                                              uint32_t coin_type,
+                                              uint32_t account,
+                                              uint32_t index,
+                                              uint8_t* key_out);
+
 /* ============================================================================
  * Transparent Signing
  * ============================================================================ */
@@ -878,6 +891,7 @@ ZsigError zsig_pczt_summary(const uint8_t* pczt_data,
  */
 typedef struct {
     uint64_t recipient_amount_zatoshis;
+    uint64_t wallet_owned_output_amount_zatoshis;
     uint64_t fee_zatoshis;
     uint32_t recipient_output_count;
     uint32_t foreign_output_count;

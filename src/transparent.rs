@@ -189,10 +189,28 @@ fn encode_transparent_address(hash160: &[u8; 20], mainnet: bool) -> Vec<u8> {
 // pub(crate) Helper Functions (used by secure_sign)
 // -----------------------------------------------------------------------------
 
-/// Derive the 32-byte transparent secret key from a BIP-39 seed.
+/// Derive the 32-byte transparent secret key from a BIP-39 seed at the
+/// account's first valid ZIP-32 diversifier index.
 ///
-/// Path: m/44'/coin_type'/account'/0/0
+/// Path: m/44'/coin_type'/account'/0/{first-valid-diversifier-index}. This
+/// matches the transparent receiver embedded in the wallet's Unified Address.
 pub(crate) fn derive_transparent_sk(seed: &[u8], coin_type: u32, account: u32) -> Option<[u8; 32]> {
+    let ext = crate::keys::SaplingExtendedKey::from_seed_at_path(seed, coin_type, account);
+    let (index, _) = crate::diversifier::find_first_valid_diversifier(&ext.dk);
+    let index = u32::try_from(index).ok()?;
+    derive_transparent_sk_at(seed, coin_type, account, index)
+}
+
+/// Derive the 32-byte transparent secret key from a BIP-39 seed at an explicit
+/// transparent address index.
+///
+/// Path: m/44'/coin_type'/account'/0/index
+pub(crate) fn derive_transparent_sk_at(
+    seed: &[u8],
+    coin_type: u32,
+    account: u32,
+    index: u32,
+) -> Option<[u8; 32]> {
     let (mut sk, mut cc) = bip32_master_key(seed);
 
     // m/44'
@@ -211,10 +229,46 @@ pub(crate) fn derive_transparent_sk(seed: &[u8], coin_type: u32, account: u32) -
     let (new_sk, new_cc) = bip32_derive_normal(&sk, &cc, 0)?;
     sk = new_sk; cc = new_cc;
 
-    // m/44'/coin_type'/account'/0/0 (first address)
-    let (new_sk, _) = bip32_derive_normal(&sk, &cc, 0)?;
+    // m/44'/coin_type'/account'/0/index
+    let (new_sk, _) = bip32_derive_normal(&sk, &cc, index)?;
 
     Some(new_sk)
+}
+
+/// Derive the transparent secret key (32 bytes) from a BIP-39 seed.
+///
+/// Path: m/44'/coin_type'/account'/0/0. This is exposed for host-side CLI
+/// verification; production watch signing derives the same key inside
+/// `zsig_pczt_sign_secure`.
+///
+/// # Safety
+/// - `seed` must point to `seed_len` valid bytes
+/// - `key_out` must point to 32 writable bytes
+#[no_mangle]
+pub unsafe extern "C" fn zsig_derive_transparent_secret_key(
+    seed: *const u8,
+    seed_len: usize,
+    coin_type: u32,
+    account: u32,
+    index: u32,
+    key_out: *mut u8,
+) -> ZsigError {
+    if seed.is_null() || key_out.is_null() {
+        return ZsigError::NullPointer;
+    }
+
+    if seed_len < 16 || seed_len > 64 {
+        return ZsigError::InvalidSeed;
+    }
+
+    let seed_slice = slice::from_raw_parts(seed, seed_len);
+    match derive_transparent_sk_at(seed_slice, coin_type, account, index) {
+        Some(sk) => {
+            core::ptr::copy_nonoverlapping(sk.as_ptr(), key_out, 32);
+            ZsigError::Success
+        }
+        None => ZsigError::InvalidKey,
+    }
 }
 
 /// Derive the transparent P2PKH pubkey hash (hash160) at

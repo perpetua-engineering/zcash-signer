@@ -8,7 +8,13 @@
 //!      change output (or a shielding destination, ZEC-4) to an attacker. The
 //!      recipient amount and the net fee are both unchanged, so `pczt_summary`
 //!      accepts it and the watch signs — the user silently loses the change.
-//!   2. **Memo display≠signed.** `pczt_summary` never looks at the note memo, so
+//!   2. **Net-neutral metadata diversion.** A compromised phone can describe an
+//!      undecryptable nonzero Orchard output as `value = 0`, making the action's
+//!      committed net value look like a dummy while preserving the visible fee.
+//!      We authenticate spent-note values by recomputing their nullifiers with
+//!      the wallet FVK, then require those values to conserve against the
+//!      PCZT's committed Orchard net value.
+//!   3. **Memo display≠signed.** `pczt_summary` never looks at the note memo, so
 //!      the phone can display memo X while signing memo Y.
 //!
 //! Closing these requires the wallet's **viewing keys**, which only exist inside
@@ -24,12 +30,13 @@
 
 use alloc::vec::Vec;
 
+use alloc::string::{String, ToString};
 use upstream_orchard::{
     keys::{
         FullViewingKey as OrchardFullViewingKey, IncomingViewingKey as OrchardIvk,
         OutgoingViewingKey as OrchardOvk, PreparedIncomingViewingKey, Scope,
     },
-    note::{ExtractedNoteCommitment, Nullifier},
+    note::{ExtractedNoteCommitment, Note as OrchardNote, Nullifier},
     note_encryption::{CompactAction, OrchardDomain},
     value::ValueCommitment as OrchardValueCommitment,
     Address as OrchardAddress,
@@ -38,7 +45,6 @@ use zcash_note_encryption::{
     try_note_decryption, try_output_recovery_with_ovk, EphemeralKeyBytes, ShieldedOutput,
     ENC_CIPHERTEXT_SIZE, OUT_CIPHERTEXT_SIZE,
 };
-use alloc::string::{String, ToString};
 
 use sapling_crypto::{
     zip32::DiversifiableFullViewingKey as SaplingDfvk, PaymentAddress as SaplingAddress,
@@ -70,11 +76,7 @@ pub struct WalletViewingKeys {
 /// Derive the wallet's viewing keys from a BIP-39 seed at the standard account
 /// path (m/.../coin_type'/account'). All key material stays local; only viewing
 /// keys (which cannot spend) are retained for the ownership test.
-pub fn derive_wallet_viewing_keys(
-    seed: &[u8],
-    coin_type: u32,
-    account: u32,
-) -> WalletViewingKeys {
+pub fn derive_wallet_viewing_keys(seed: &[u8], coin_type: u32, account: u32) -> WalletViewingKeys {
     // Orchard FVK from the ZIP-32 spending key.
     let orchard_fvk = {
         let sk_bytes = crate::keys::derive_orchard_sk(seed, coin_type, account);
@@ -142,6 +144,11 @@ impl WalletViewingKeys {
 pub struct PcztVerdict {
     /// Total value sent to the approved recipient (across all pools), zatoshis.
     pub recipient_amount_zatoshis: u64,
+    /// Total positive value sent to wallet-owned non-recipient outputs, zatoshis.
+    /// Shielding PCZTs use this to bind the displayed shield amount to the signed
+    /// owned Orchard output, because a redacted shielding output is not an
+    /// external recipient payment.
+    pub wallet_owned_output_amount_zatoshis: u64,
     /// Net transaction fee, zatoshis.
     pub fee_zatoshis: u64,
     /// Number of outputs paying the approved recipient.
@@ -242,6 +249,10 @@ pub fn pczt_verify(
     }
 
     let mut amount: u128 = 0;
+    let mut wallet_owned_output_amount: u128 = 0;
+    let mut orchard_output_value: u128 = 0;
+    let (orchard_spend_value, mut orchard_conservation_failed) =
+        authenticated_orchard_spend_total(&pczt, keys)?;
     let orchard_ivks = keys.orchard_prepared_ivks();
     let orchard_ovks = keys.orchard_ovks();
 
@@ -260,7 +271,11 @@ pub fn pczt_verify(
             continue;
         }
         match p2pkh_hash(script) {
-            Some(hash) if keys.transparent_owns(&hash) => {}
+            Some(hash) if keys.transparent_owns(&hash) => {
+                wallet_owned_output_amount = wallet_owned_output_amount
+                    .checked_add(u128::from(*output.value()))
+                    .ok_or(PcztSignError::SummaryOverflow)?;
+            }
             _ => {
                 verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
                 verdict.all_outputs_accounted = false;
@@ -298,21 +313,36 @@ pub fn pczt_verify(
         if !owned {
             verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
             verdict.all_outputs_accounted = false;
+        } else if let Some(value) = *output.value() {
+            wallet_owned_output_amount = wallet_owned_output_amount
+                .checked_add(u128::from(value))
+                .ok_or(PcztSignError::SummaryOverflow)?;
         }
     }
 
     // ── Orchard outputs (actions) ──────────────────────────────────────────
     for action in pczt.orchard().actions() {
         let output = action.output();
-        let parsed_addr = output
-            .recipient()
-            .as_ref()
-            .and_then(|raw| Option::<OrchardAddress>::from(OrchardAddress::from_raw_address_bytes(raw)));
+        let output_value = match output.value() {
+            Some(value) => {
+                orchard_output_value = orchard_output_value
+                    .checked_add(u128::from(*value))
+                    .ok_or(PcztSignError::SummaryOverflow)?;
+                Some(*value)
+            }
+            None => {
+                orchard_conservation_failed = true;
+                None
+            }
+        };
+        let parsed_addr = output.recipient().as_ref().and_then(|raw| {
+            Option::<OrchardAddress>::from(OrchardAddress::from_raw_address_bytes(raw))
+        });
 
-        let is_recipient = match (output.recipient(), output.value()) {
+        let is_recipient = match (output.recipient(), output_value) {
             (Some(raw), Some(value)) if recipient.orchard.as_ref() == Some(raw) => {
                 amount = amount
-                    .checked_add(u128::from(*value))
+                    .checked_add(u128::from(value))
                     .ok_or(PcztSignError::SummaryOverflow)?;
                 verdict.recipient_output_count = verdict.recipient_output_count.saturating_add(1);
                 true
@@ -324,9 +354,7 @@ pub fn pczt_verify(
             // Recover the memo from the signed ciphertext (sender-side, via ock)
             // and bind it to the approved memo.
             if !approved.expected_memo.is_empty() {
-                if let Some(memo) =
-                    recover_orchard_memo(action, &orchard_ovks)
-                {
+                if let Some(memo) = recover_orchard_memo(action, &orchard_ovks) {
                     verdict.memo_checked = true;
                     verdict.memo_matches = canonical_memo(&memo) == approved.expected_memo;
                 }
@@ -334,16 +362,12 @@ pub fn pczt_verify(
             continue;
         }
 
-        // Not the recipient: must be wallet-owned (change / self). Only a
-        // POSITIVE-value output can divert funds, so we never flag a zero-value
-        // output. Orchard bundles pad with dummy actions (value 0, random
-        // recipient) — flagging those would refuse every real transaction
-        // (P0). A hidden non-zero value can't slip through here either: the
-        // value commitments feed `orchard().value_sum()`, so any value the
-        // `value` field understates shifts the computed fee and trips the fee
-        // check upstream. Fail-closed: a redacted/absent value is treated as
-        // potentially nonzero and must be owned.
-        let has_positive_value = (*output.value()).map(|v| v > 0).unwrap_or(true);
+        // Not the recipient: must be wallet-owned (change / self). Dummy
+        // Orchard outputs are represented with value 0, but zero-value metadata
+        // is not trusted by itself: when Orchard spends are present, the
+        // authenticated-spend conservation check below binds those values back
+        // to the committed Orchard net value.
+        let has_positive_value = output_value.map(|v| v > 0).unwrap_or(true);
         if has_positive_value {
             let owned = match parsed_addr.as_ref() {
                 Some(addr) if keys.orchard_owns(addr) => true,
@@ -353,14 +377,28 @@ pub fn pczt_verify(
             if !owned {
                 verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
                 verdict.all_outputs_accounted = false;
+            } else if let Some(value) = output_value {
+                wallet_owned_output_amount = wallet_owned_output_amount
+                    .checked_add(u128::from(value))
+                    .ok_or(PcztSignError::SummaryOverflow)?;
             }
         }
     }
 
-    if amount > u128::from(u64::MAX) {
+    if !pczt.orchard().actions().is_empty() {
+        let metadata_net = signed_delta(orchard_spend_value, orchard_output_value)?;
+        let committed_net = signed_orchard_value_sum(*pczt.orchard().value_sum())?;
+        if orchard_conservation_failed || metadata_net != committed_net {
+            verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
+            verdict.all_outputs_accounted = false;
+        }
+    }
+
+    if amount > u128::from(u64::MAX) || wallet_owned_output_amount > u128::from(u64::MAX) {
         return Err(PcztSignError::SummaryOverflow);
     }
     verdict.recipient_amount_zatoshis = amount as u64;
+    verdict.wallet_owned_output_amount_zatoshis = wallet_owned_output_amount as u64;
     Ok(verdict)
 }
 
@@ -375,9 +413,8 @@ fn orchard_output_parts(
 ) -> Option<(OrchardDomain, OrchardOutputCiphertext)> {
     let output = action.output();
     let nf = Option::<Nullifier>::from(Nullifier::from_bytes(action.spend().nullifier()))?;
-    let cmx = Option::<ExtractedNoteCommitment>::from(ExtractedNoteCommitment::from_bytes(
-        output.cmx(),
-    ))?;
+    let cmx =
+        Option::<ExtractedNoteCommitment>::from(ExtractedNoteCommitment::from_bytes(output.cmx()))?;
     let epk_bytes = *output.ephemeral_key();
     let enc_vec = output.enc_ciphertext();
     if enc_vec.len() != ENC_CIPHERTEXT_SIZE {
@@ -388,12 +425,7 @@ fn orchard_output_parts(
 
     let mut compact = [0u8; 52];
     compact.copy_from_slice(&enc[..52]);
-    let compact_action = CompactAction::from_parts(
-        nf,
-        cmx,
-        EphemeralKeyBytes(epk_bytes),
-        compact,
-    );
+    let compact_action = CompactAction::from_parts(nf, cmx, EphemeralKeyBytes(epk_bytes), compact);
     let domain = OrchardDomain::for_compact_action(&compact_action);
     let wrapper = OrchardOutputCiphertext {
         epk: EphemeralKeyBytes(epk_bytes),
@@ -416,14 +448,83 @@ fn orchard_action_is_ours(
         .any(|ivk| try_note_decryption(&domain, ivk, &wrapper).is_some())
 }
 
+fn authenticated_orchard_spend_total(
+    pczt: &pczt::Pczt,
+    keys: &WalletViewingKeys,
+) -> Result<(u128, bool), PcztSignError> {
+    let mut total = 0u128;
+    let mut failed = false;
+
+    let result = pczt::roles::verifier::Verifier::new(pczt.clone()).with_orchard(|bundle| {
+        for action in bundle.actions() {
+            match authenticated_orchard_spend_value(action, keys) {
+                Ok(value) => {
+                    total = total
+                        .checked_add(u128::from(value))
+                        .ok_or(pczt::roles::verifier::OrchardError::Custom(()))?;
+                }
+                Err(()) => {
+                    failed = true;
+                }
+            }
+        }
+        Ok::<(), pczt::roles::verifier::OrchardError<()>>(())
+    });
+
+    if result.is_err() {
+        failed = true;
+    }
+
+    Ok((total, failed))
+}
+
+/// Returns the authenticated Orchard spend value for this action.
+///
+/// The value is trusted only after reconstructing the spent note from the PCZT
+/// spend fields and recomputing its nullifier with our FVK. This binds the
+/// phone-provided spend value to a consensus field that the transaction reveals,
+/// closing the net-neutral "real output described as value 0" attack.
+fn authenticated_orchard_spend_value(
+    action: &upstream_orchard::pczt::Action,
+    keys: &WalletViewingKeys,
+) -> Result<u64, ()> {
+    let spend = action.spend();
+    let Some(value) = *spend.value() else {
+        return Err(());
+    };
+    if value.inner() == 0 {
+        return Ok(0);
+    }
+
+    let Some(fvk) = keys.orchard_fvk.as_ref() else {
+        return Err(());
+    };
+    let Some(recipient) = *spend.recipient() else {
+        return Err(());
+    };
+    let Some(rho) = *spend.rho() else {
+        return Err(());
+    };
+    let Some(rseed) = *spend.rseed() else {
+        return Err(());
+    };
+    let Some(note) =
+        Option::<OrchardNote>::from(OrchardNote::from_parts(recipient, value, rho, rseed))
+    else {
+        return Err(());
+    };
+
+    if note.nullifier(fvk).to_bytes() != spend.nullifier().to_bytes() {
+        return Err(());
+    }
+    Ok(value.inner())
+}
+
 /// Recover the recipient note's memo as the *sender* using our outgoing viewing
 /// keys. Orchard derives the outgoing cipher key from `ovk`, the action's value
 /// commitment (`cv_net`), cmx and epk, so we reconstruct `cv` from `cv_net` and
 /// try each scope's OVK. Returns the raw 512-byte memo if recovered.
-fn recover_orchard_memo(
-    action: &pczt::orchard::Action,
-    ovks: &[OrchardOvk],
-) -> Option<[u8; 512]> {
+fn recover_orchard_memo(action: &pczt::orchard::Action, ovks: &[OrchardOvk]) -> Option<[u8; 512]> {
     let (domain, wrapper) = orchard_output_parts(action)?;
     let output = action.output();
     let out_vec = output.out_ciphertext();
@@ -433,8 +534,9 @@ fn recover_orchard_memo(
     let mut out_ct = [0u8; OUT_CIPHERTEXT_SIZE];
     out_ct.copy_from_slice(out_vec);
 
-    let cv =
-        Option::<OrchardValueCommitment>::from(OrchardValueCommitment::from_bytes(action.cv_net()))?;
+    let cv = Option::<OrchardValueCommitment>::from(OrchardValueCommitment::from_bytes(
+        action.cv_net(),
+    ))?;
 
     for ovk in ovks {
         if let Some((_, _, memo)) =
@@ -481,7 +583,11 @@ fn canonical_memo(memo: &[u8; 512]) -> String {
     match memo[0] {
         0xF6 => String::new(),
         lead if lead <= 0xF4 => {
-            let end = memo.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
+            let end = memo
+                .iter()
+                .rposition(|&b| b != 0)
+                .map(|i| i + 1)
+                .unwrap_or(0);
             core::str::from_utf8(&memo[..end])
                 .map(|s| s.to_string())
                 .unwrap_or_default()
@@ -513,6 +619,16 @@ fn compute_fee(pczt: &pczt::Pczt) -> Result<u64, PcztSignError> {
     Ok(fee as u64)
 }
 
+fn signed_delta(lhs: u128, rhs: u128) -> Result<i128, PcztSignError> {
+    if lhs >= rhs {
+        i128::try_from(lhs - rhs).map_err(|_| PcztSignError::SummaryOverflow)
+    } else {
+        i128::try_from(rhs - lhs)
+            .map(|value| -value)
+            .map_err(|_| PcztSignError::SummaryOverflow)
+    }
+}
+
 fn sum_u64(mut values: impl Iterator<Item = u64>) -> Result<i128, PcztSignError> {
     values.try_fold(0i128, |sum, value| {
         sum.checked_add(i128::from(value))
@@ -523,7 +639,9 @@ fn sum_u64(mut values: impl Iterator<Item = u64>) -> Result<i128, PcztSignError>
 fn signed_orchard_value_sum(value_sum: (u64, bool)) -> Result<i128, PcztSignError> {
     let magnitude = i128::from(value_sum.0);
     if value_sum.1 {
-        magnitude.checked_neg().ok_or(PcztSignError::SummaryOverflow)
+        magnitude
+            .checked_neg()
+            .ok_or(PcztSignError::SummaryOverflow)
     } else {
         Ok(magnitude)
     }
@@ -539,6 +657,7 @@ use core::{slice, str};
 #[repr(C)]
 pub struct ZsigPcztVerdict {
     pub recipient_amount_zatoshis: u64,
+    pub wallet_owned_output_amount_zatoshis: u64,
     pub fee_zatoshis: u64,
     pub recipient_output_count: u32,
     pub foreign_output_count: u32,
@@ -584,6 +703,8 @@ pub(crate) fn verify_ffi_common(
         Ok(verdict) => {
             unsafe {
                 (*out).recipient_amount_zatoshis = verdict.recipient_amount_zatoshis;
+                (*out).wallet_owned_output_amount_zatoshis =
+                    verdict.wallet_owned_output_amount_zatoshis;
                 (*out).fee_zatoshis = verdict.fee_zatoshis;
                 (*out).recipient_output_count = verdict.recipient_output_count;
                 (*out).foreign_output_count = verdict.foreign_output_count;
@@ -680,7 +801,6 @@ fn p2pkh_hash(script: &[u8]) -> Option<[u8; 20]> {
         _ => None,
     }
 }
-
 
 // =============================================================================
 // Tests
