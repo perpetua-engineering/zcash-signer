@@ -239,14 +239,10 @@ pub fn pczt_verify(
         fee_zatoshis: fee,
         all_outputs_accounted: true,
         recipient_owned,
+        memo_matches: true,
+        memo_checked: approved.expected_memo.is_empty(),
         ..PcztVerdict::default()
     };
-    // No memo expected ⇒ nothing to check (an injected memo on an owned/own
-    // output is not fund-loss; the recipient memo is the bound field).
-    if approved.expected_memo.is_empty() {
-        verdict.memo_checked = true;
-        verdict.memo_matches = true;
-    }
 
     let mut amount: u128 = 0;
     let mut wallet_owned_output_amount: u128 = 0;
@@ -296,6 +292,11 @@ pub fn pczt_verify(
             _ => false,
         };
         if is_recipient {
+            // Sapling output memos are encrypted too, but this verifier does not
+            // yet recover them. Refuse Sapling recipients rather than signing an
+            // unbound display-vs-signed memo.
+            verdict.memo_checked = false;
+            verdict.memo_matches = false;
             continue;
         }
         // Zero-value outputs can't divert funds (see the Orchard note); only
@@ -352,11 +353,19 @@ pub fn pczt_verify(
 
         if is_recipient {
             // Recover the memo from the signed ciphertext (sender-side, via ock)
-            // and bind it to the approved memo.
-            if !approved.expected_memo.is_empty() {
-                if let Some(memo) = recover_orchard_memo(action, &orchard_ovks) {
+            // and bind it to the approved memo. This runs even when the approved
+            // memo is empty, so an injected signed memo is refused instead of
+            // being treated as "nothing to check".
+            match recover_orchard_memo(action, &orchard_ovks) {
+                Some(memo) => {
                     verdict.memo_checked = true;
-                    verdict.memo_matches = canonical_memo(&memo) == approved.expected_memo;
+                    if canonical_memo(&memo) != approved.expected_memo {
+                        verdict.memo_matches = false;
+                    }
+                }
+                None => {
+                    verdict.memo_checked = false;
+                    verdict.memo_matches = false;
                 }
             }
             continue;

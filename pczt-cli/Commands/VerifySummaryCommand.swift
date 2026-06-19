@@ -116,6 +116,9 @@ struct VerifySummaryCommand: AsyncParsableCommand {
                 failures.append("totality fee mismatch: PCZT=\(verdict.feeZatoshis) approved=\(expect)")
             }
             if shielding {
+                if verdict.recipientOutputCount != 0 || verdict.recipientAmountZatoshis != 0 {
+                    failures.append("shielding PCZT contains an external recipient output — the watch would REJECT.")
+                }
                 if let expect = expectAmount, verdict.walletOwnedOutputAmountZatoshis != expect {
                     failures.append("shielding amount mismatch: wallet-owned output=\(verdict.walletOwnedOutputAmountZatoshis) approved=\(expect)")
                 }
@@ -127,8 +130,11 @@ struct VerifySummaryCommand: AsyncParsableCommand {
                     failures.append("totality amount mismatch: PCZT=\(verdict.recipientAmountZatoshis) approved=\(expectedAmount)")
                 }
             }
-            if !memo.isEmpty, !(verdict.memoChecked && verdict.memoMatches) {
+            if !verdict.memoMatches {
                 failures.append("memo display!=signed: approved memo not bound to the recipient note. The watch would REJECT.")
+            }
+            if !memo.isEmpty, !verdict.memoChecked {
+                failures.append("memo could not be recovered from the recipient note. The watch would REJECT.")
             }
             if shielding, !verdict.recipientOwned {
                 failures.append("ZEC-4: shielding destination is NOT wallet-owned — the watch would REJECT.")
