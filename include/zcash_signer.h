@@ -955,7 +955,13 @@ ZsigError zsig_pczt_verify(const uint8_t* seed,
  *   output: Buffer for signed PCZT output
  *   output_len: Size of output buffer
  *   output_len_out: Receives actual length of signed PCZT
- *   rng: Ignored (kept for ABI compatibility)
+ *
+ * RNG contract (CR-1465): signature randomness comes from upstream pczt's
+ * Signer role via rand_core::OsRng — CCRandomGenerateBytes on iOS/watchOS,
+ * getentropy on macOS, the getrandom(2) syscall on Android (with the pinned
+ * crate's documented /dev/urandom compatibility path). A CSPRNG failure is
+ * fatal (OsRng panics and release builds are panic = "abort"); no partial
+ * or zero-filled signature can be returned.
  *
  * Returns:
  *   ZSIG_SUCCESS on success
@@ -973,8 +979,7 @@ ZsigError zsig_pczt_sign(const uint8_t* pczt_data,
                           const uint8_t* transparent_sk,
                           uint8_t* output,
                           size_t output_len,
-                          size_t* output_len_out,
-                          ZsigRngCallback rng);
+                          size_t* output_len_out);
 
 /* ============================================================================
  * Secure PCZT Signing (SE-encrypted mnemonic, seed never in Swift)
@@ -1000,6 +1005,10 @@ ZsigError zsig_pczt_sign(const uint8_t* pczt_data,
  *   account:                Account index
  *   out_signed_pczt:        Receives pointer to heap-allocated signed PCZT
  *   out_len:                Receives length of signed PCZT
+ *
+ * RNG contract (CR-1465): same as zsig_pczt_sign — signature randomness comes
+ * from upstream pczt's Signer role via rand_core::OsRng, not from a callback.
+ * A CSPRNG failure is fatal (OsRng panics; release builds are panic = "abort").
  *
  * Returns:
  *   ZSIG_SUCCESS (0) on success, or a ZsigError code on failure

@@ -480,7 +480,7 @@ fn signed_orchard_value_sum(value_sum: (u64, bool)) -> Result<i128, PcztSignErro
 // =============================================================================
 
 use core::slice;
-use crate::{ZsigError, ZsigRngCallback};
+use crate::ZsigError;
 
 /// PCZT info returned by `zsig_pczt_info`.
 #[repr(C)]
@@ -610,7 +610,14 @@ pub unsafe extern "C" fn zsig_pczt_summary(
 /// - `transparent_sk` if non-null must point to 32 readable bytes (secp256k1 secret key)
 /// - `output` must point to `output_len` writable bytes
 /// - `output_len_out` must point to a writable `usize`
-/// - `rng_callback` is ignored (kept for ABI compatibility)
+///
+/// # RNG contract (CR-1465)
+/// Signature randomness comes from upstream `pczt`'s `Signer::sign_sapling` /
+/// `sign_orchard`, which use `rand_core::OsRng`. The pinned getrandom backend
+/// per target is verified against the built artifact by
+/// `tools/build/pczt_rng_verify.py`. A CSPRNG failure is fatal: `OsRng`
+/// panics on OS RNG failure and release builds are `panic = "abort"`, so no
+/// partial or zero-filled signature can ever be returned.
 #[no_mangle]
 pub unsafe extern "C" fn zsig_pczt_sign(
     pczt_data: *const u8,
@@ -622,9 +629,8 @@ pub unsafe extern "C" fn zsig_pczt_sign(
     output: *mut u8,
     output_len: usize,
     output_len_out: *mut usize,
-    _rng_callback: ZsigRngCallback,
 ) -> ZsigError {
-    // sighash and rng_callback are kept for ABI compatibility but ignored.
+    // sighash is kept for ABI compatibility but ignored (computed internally).
     let _ = sighash;
 
     if pczt_data.is_null() || output.is_null() || output_len_out.is_null() {

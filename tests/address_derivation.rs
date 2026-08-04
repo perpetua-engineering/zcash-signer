@@ -119,7 +119,7 @@ fn our_orchard_address_from_sk(sk_bytes: &[u8; 32]) -> ZsigOrchardAddress {
         diversifier: [0u8; 11],
         pk_d: [0u8; 32],
     };
-    let err = unsafe { zsig_derive_orchard_address(sk_bytes.as_ptr(), &mut addr) };
+    let err = unsafe { zsig_derive_orchard_address(sk_bytes.as_ptr(), 0, &mut addr) };
     assert_eq!(err, ZsigError::Success, "zsig_derive_orchard_address failed");
     addr
 }
@@ -136,6 +136,7 @@ fn our_orchard_address(seed: &[u8], coin_type: u32, account: u32) -> ZsigOrchard
             seed.len(),
             coin_type,
             account,
+            0,
             &mut addr,
         )
     };
@@ -244,9 +245,16 @@ fn upstream_sapling_dfvk(
 
 /// Cross-check Orchard IVK/pk_d derivation using the same diversifier on both sides.
 ///
-/// Our code uses a raw all-zeros diversifier (not DiversifierKey-derived). To validate
-/// that our Sinsemilla commit_ivk produces the correct IVK, we pass the same raw
-/// all-zeros diversifier to upstream's `fvk.address(diversifier, scope)` and compare pk_d.
+/// This test isolates the Sinsemilla `commit_ivk` computation. Since CR-990 our
+/// FFI derives the diversifier from the ZIP-32 diversifier key at the requested
+/// index (it previously used a raw all-zeros diversifier), so rather than assume
+/// a diversifier, we take whichever one our FFI produced and hand that exact
+/// value to upstream's `fvk.address(diversifier, scope)`. Same diversifier →
+/// same g_d, so if the IVK matches, pk_d must match.
+///
+/// Holding the diversifier equal on both sides is what makes this a test of the
+/// IVK alone: the diversifier derivation itself is CR-990's contract and is
+/// covered by `sapling_diversifier_matches_upstream` and the FF1 unit tests.
 ///
 /// If the Sinsemilla IVK computation were wrong, pk_d = ivk * g_d would differ.
 #[test]
@@ -254,16 +262,9 @@ fn orchard_ivk_produces_correct_pk_d() {
     for (i, (seed, coin_type, account)) in test_vectors().iter().enumerate() {
         let our_addr = our_orchard_address(seed, *coin_type, *account);
 
-        // Our code uses all-zeros diversifier
-        assert_eq!(
-            our_addr.diversifier,
-            [0u8; 11],
-            "Expected all-zeros diversifier from our code for vector {i}"
-        );
-
-        // Use the same all-zeros diversifier with upstream
+        // Feed the diversifier our FFI derived to upstream and compare pk_d.
         let upstream_fvk = upstream_orchard_fvk(seed, *coin_type, *account);
-        let diversifier = OrchardDiversifier::from_bytes([0u8; 11]);
+        let diversifier = OrchardDiversifier::from_bytes(our_addr.diversifier);
         let upstream_addr = upstream_fvk.address(diversifier, Scope::External);
         let upstream_raw = upstream_addr.to_raw_address_bytes();
 

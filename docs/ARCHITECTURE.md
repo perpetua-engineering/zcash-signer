@@ -146,10 +146,19 @@ The release profile also sets:
 - `codegen-units = 1` — maximize optimization opportunity
 - `strip = false` — symbols must be preserved for static library linking
 
-## RNG bridge
+## Randomness
 
-Rust's `OsRng` (from the `getrandom` crate) does not support watchOS tier-3 targets.
-Instead, the crate receives randomness via a C function pointer callback:
+There are two distinct randomness paths in this crate. They are not
+interchangeable, and only one of them is a callback.
+
+### 1. Low-level signing APIs — caller-supplied callback
+
+`zsig_sign_orchard` and `zsig_sign_sapling` (in `src/signing.rs`) take an
+explicit RNG callback. They belong to the `no_std` base crate, which depends on
+`rand_core` with `default-features = false` and therefore has **no** `getrandom`
+dependency at all. The callback lets the caller supply platform randomness
+without the base crate taking an OS RNG dependency — which is what keeps it
+buildable for watchOS tier-3 targets under `-Z build-std=core,alloc`:
 
 ```rust
 pub type ZsigRngCallback = unsafe extern "C" fn(*mut u8, usize) -> i32;
@@ -163,22 +172,74 @@ impl CryptoRng for CallbackRng {}
 impl RngCore for CallbackRng { /* delegates to callback */ }
 ```
 
-The Swift caller passes a callback that wraps `SecRandomCopyBytes`:
-
-```swift
-let rngCallback: ZsigRngCallback = { buf, len in
-    SecRandomCopyBytes(kSecRandomDefault, len, buf!)
-}
-```
-
-This gives the Rust code a `CryptoRng + RngCore` implementor backed by the platform's
-hardware RNG (Secure Enclave on Apple Watch). The `failed` flag tracks callback errors
-so callers can check after a sequence of RNG-consuming operations.
+The caller passes a callback wrapping the platform CSPRNG (`SecRandomCopyBytes`
+on Apple). The `failed` flag tracks callback errors so callers can check after a
+sequence of RNG-consuming operations.
 
 **Why not `register_custom_getrandom!`?** The `getrandom` crate supports custom
 implementations via a registration macro, but this interacts poorly with `build-std`
 and feature unification across the dependency graph. The callback approach is simpler,
 more explicit, and avoids any global state or linker-order dependencies.
+
+### 2. PCZT signing — upstream `OsRng` (CR-1465)
+
+`zsig_pczt_sign` and `zsig_pczt_sign_secure` delegate to upstream `pczt`'s
+`Signer::sign_sapling` / `sign_orchard`, which hardcode `rand_core::OsRng`
+internally. There is deliberately **no** RNG callback on these entry points:
+upstream exposes no generic `*_with_rng` variant, and reimplementing PCZT
+sighash, nullifier verification, and transaction-modifiability rules locally to
+force a callback would add more cryptographic risk than it removes.
+
+This is not a weaker source. `OsRng` resolves through the pinned `getrandom`
+0.2.17 backend for each target:
+
+| Target | `getrandom` backend | OS primitive |
+|--------|--------------------|--------------|
+| iOS / watchOS | `apple-other` | `CCRandomGenerateBytes` |
+| macOS | `getentropy` | `getentropy(2)` |
+| Android | `linux_android_with_fallback` | `getrandom(2)` syscall, with the crate's documented `/dev/urandom` compatibility path when the syscall is unavailable |
+
+All of these draw from the same OS root CSPRNG that `SecRandomCopyBytes` uses,
+so routing PCZT randomness through the callback would not yield independent
+entropy — only different error plumbing.
+
+**CSPRNG failure is fatal.** `getrandom` checks the OS return status,
+`OsRng::fill_bytes` panics on failure, and release builds set `panic = "abort"`.
+There is no path that returns a partial, zero-filled, or unsigned result: the
+process aborts instead. This is deliberate — a silently weak signature would
+leak the spend authorization key.
+
+Because this contract lives in upstream code rather than in an API we control,
+it is enforced against the built artifacts rather than asserted in prose.
+`tools/build/pczt_rng_verify.py` probes every Apple slice and Android ABI with
+`llvm-nm`. The two platforms need different evidence because they link
+differently:
+
+- **Apple** archives keep one object per crate, so each undefined RNG import can
+  be attributed to the crate that emitted it. The expected backend import must
+  come from the pinned `getrandom` objects — an import of the same name from
+  anywhere else in the archive does not count — and no disallowed RNG import may
+  appear in any member. That alone would only show getrandom is *present*, so
+  the probe additionally requires `rand_core`'s object to carry an undefined
+  reference to `getrandom::imp::getrandom_inner`: that link is what proves
+  `OsRng` itself reaches the pinned crate, rather than getrandom having been
+  linked in for some other consumer.
+- **Android** archives are LTO-merged into a single object, so attribution is
+  impossible. The probe instead fingerprints the backend by mangled Rust symbol
+  names, which survive LTO. `HAS_GETRANDOM` is defined only by
+  `linux_android_with_fallback.rs`, so requiring it discriminates the pinned
+  backend from the no-fallback `linux_android.rs` variant.
+
+It also pins the Cargo feature graph (`pczt-signer` → `rand_core/getrandom`) and
+the locked `getrandom` / `rand_core` versions, and rejects a registered custom
+`getrandom` backend. The build runs it on cached *and* freshly built artifacts
+before the cache stores them or the manifest records them as good.
+
+### Not in this crate: mnemonic entropy
+
+BIP-39 mnemonic generation is WalletCore's responsibility, not this crate's.
+`zcash-signer` only ever *consumes* an existing seed. Neither randomness path
+above is involved in creating one.
 
 ## Vendor patches
 
@@ -291,8 +352,14 @@ All dependencies are configured with `default-features = false` to avoid pulling
   private key material — only the signed PCZT.
 - **Zeroization:** The `secure-signer` feature wraps seeds and derived keys in
   `Zeroizing<T>` (from the `zeroize` crate), ensuring memory is overwritten on drop.
-- **RNG source:** Randomness comes from `SecRandomCopyBytes`, backed by the Secure
-  Enclave's hardware RNG. The callback pattern ensures the Rust code never tries to
-  access `/dev/urandom` or other OS facilities that may not exist on watchOS.
+- **RNG source:** Two paths, detailed in [Randomness](#randomness). The low-level
+  `zsig_sign_*` APIs take a caller-supplied callback (`SecRandomCopyBytes` on Apple).
+  PCZT signing uses upstream `rand_core::OsRng`, which *does* reach an OS facility —
+  `CCRandomGenerateBytes` on iOS/watchOS, `getentropy` on macOS, `getrandom(2)` on
+  Android — all rooted in the same OS CSPRNG. The linked backend is proven per slice
+  and per ABI by `tools/build/pczt_rng_verify.py` before the artifact is accepted.
+- **RNG failure is fatal:** A CSPRNG failure during PCZT signing aborts the process
+  (`OsRng` panics; release builds use `panic = "abort"`). No partial, zero-filled, or
+  unsigned result can be returned.
 - **Constant-time operations:** Signature and key operations use the constant-time
   implementations provided by `reddsa`, `k256`, and the vendored `constant_time_eq`.

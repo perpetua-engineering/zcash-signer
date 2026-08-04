@@ -214,8 +214,8 @@ For direct C/Objective-C usage:
 
 ## Architecture Notes
 
-For a deep dive on the `no_std` design, allocator, RNG bridge, vendor patches, and
-build pipeline, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+For a deep dive on the `no_std` design, allocator, the two randomness paths, vendor
+patches, and build pipeline, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ### Why This Exists
 
@@ -297,7 +297,13 @@ upstream `orchard`, `sapling-crypto`, and `zcash_transparent` crates:
 ## Security
 
 - Keys are never logged or persisted by this library
-- RNG is provided via callback (use `SecRandomCopyBytes` on Apple platforms)
+- Randomness comes from two distinct paths (see [ARCHITECTURE.md](docs/ARCHITECTURE.md#randomness)):
+  the low-level `zsig_sign_orchard` / `zsig_sign_sapling` APIs take a caller-supplied
+  RNG callback (use `SecRandomCopyBytes` on Apple platforms), while PCZT signing uses
+  upstream `pczt`'s `rand_core::OsRng` and takes no callback. The per-target `OsRng`
+  backend is verified against the built artifacts by `tools/build/pczt_rng_verify.py`.
+- A CSPRNG failure during PCZT signing is fatal: `OsRng` panics and release builds are
+  `panic = "abort"`, so no partial or zero-filled signature can be returned
 - All operations use constant-time implementations where available
 - `secure-signer` feature wraps seed and keys in `Zeroizing<T>` (zeroed on drop)
 - `zsig_pczt_sign_secure` accepts SE-encrypted mnemonic — seed decrypted in C++, used in Rust, never exposed to Swift

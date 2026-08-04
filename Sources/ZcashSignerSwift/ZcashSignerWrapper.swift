@@ -1062,6 +1062,11 @@ public func pcztSummary(
 ///   - saplingAsk: 32-byte Sapling spend authorizing key (nil to skip Sapling signing)
 ///   - transparentSecretKey: 32-byte secp256k1 secret key (nil to skip transparent signing)
 /// - Returns: Signed PCZT binary data
+///
+/// RNG contract (CR-1465): signature randomness comes from upstream pczt's
+/// Signer role via `rand_core::OsRng` (CCRandomGenerateBytes on iOS/watchOS,
+/// getentropy on macOS). A CSPRNG failure is fatal (panic = "abort"); no
+/// partial or zero-filled signature can be returned.
 public func pcztSign(
     pcztData: Data,
     orchardSpendingKey: Data? = nil,
@@ -1096,8 +1101,7 @@ public func pcztSign(
                         transparentPtr,
                         &output,
                         outputCapacity,
-                        &outputLen,
-                        nil  // rng — no longer needed, kept for ABI compat
+                        &outputLen
                     )
                 }
             }
