@@ -213,6 +213,11 @@ pub fn pczt_verify(
     let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|_| PcztSignError::ParseFailed)?;
     let recipient = RecipientReceivers::parse(approved.recipient_address, approved.network)?;
 
+    // CR-1485: everything below proves things about the PCZT's *output set*.
+    // That proof is worthless for a transparent input whose signature does not
+    // commit to the outputs, so require SIGHASH_ALL before doing the work.
+    enforce_sighash_all(&pczt)?;
+
     let fee = compute_fee(&pczt)?;
 
     // ZEC-4: is the approved recipient itself one of our addresses? A shielding
@@ -409,6 +414,46 @@ pub fn pczt_verify(
     verdict.recipient_amount_zatoshis = amount as u64;
     verdict.wallet_owned_output_amount_zatoshis = wallet_owned_output_amount as u64;
     Ok(verdict)
+}
+
+/// ZIP-244 `SIGHASH_ALL`. The only sighash type whose transparent signature
+/// commits to the transaction's full output set.
+const SIGHASH_ALL: u8 = 0x01;
+
+/// Refuse a PCZT that asks the watch to sign any transparent input with a
+/// sighash type other than `SIGHASH_ALL` (CR-1485).
+///
+/// `sign_pczt` signs every transparent input with the sighash type the *phone*
+/// put in the PCZT, and `SighashType::parse` accepts `SIGHASH_NONE`,
+/// `SIGHASH_SINGLE`, and `SIGHASH_ANYONECANPAY`. A signature under any of those
+/// does not commit to the outputs this module just proved are the approved
+/// recipient plus wallet-owned change, so a compromised phone could collect the
+/// signature and then rewrite the outputs — display≠signed with total loss of
+/// the transparent inputs. Only `SIGHASH_ALL` makes the totality proof binding.
+///
+/// Fail-closed: an unparseable transparent bundle also refuses. That costs
+/// nothing in practice, because `sign_pczt` builds `Signer::new`, which parses
+/// the same bundle — a PCZT that fails here could never have been signed.
+fn enforce_sighash_all(pczt: &pczt::Pczt) -> Result<(), PcztSignError> {
+    if pczt.transparent().inputs().is_empty() {
+        return Ok(());
+    }
+
+    let mut all_sighash_all = true;
+    let result =
+        pczt::roles::verifier::Verifier::new(pczt.clone()).with_transparent(|bundle| {
+            for input in bundle.inputs() {
+                if input.sighash_type().encode() != SIGHASH_ALL {
+                    all_sighash_all = false;
+                }
+            }
+            Ok::<(), pczt::roles::verifier::TransparentError<()>>(())
+        });
+
+    if result.is_err() || !all_sighash_all {
+        return Err(PcztSignError::UnsupportedSighashType);
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------

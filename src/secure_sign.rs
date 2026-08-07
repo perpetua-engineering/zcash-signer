@@ -98,7 +98,8 @@ fn pczt_sign_secure(
             | PcztSignError::TransparentSignFailed
             | PcztSignError::InvalidRecipientAddress
             | PcztSignError::SummaryUnavailable
-            | PcztSignError::SummaryOverflow => ZsigError::PcztSignFailed,
+            | PcztSignError::SummaryOverflow
+            | PcztSignError::UnsupportedSighashType => ZsigError::PcztSignFailed,
         }
     })?;
 

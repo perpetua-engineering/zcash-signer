@@ -56,6 +56,10 @@ pub enum PcztSignError {
     SummaryUnavailable,
     /// PCZT value balance overflowed the verifier's arithmetic.
     SummaryOverflow,
+    /// A transparent input asks to be signed with a sighash type other than
+    /// `SIGHASH_ALL`, so its signature would not commit to the output set the
+    /// watch just verified (CR-1485).
+    UnsupportedSighashType,
 }
 
 impl fmt::Display for PcztSignError {
@@ -71,6 +75,9 @@ impl fmt::Display for PcztSignError {
             Self::InvalidRecipientAddress => write!(f, "invalid recipient address"),
             Self::SummaryUnavailable => write!(f, "PCZT summary unavailable"),
             Self::SummaryOverflow => write!(f, "PCZT summary overflow"),
+            Self::UnsupportedSighashType => {
+                write!(f, "transparent input requires a non-SIGHASH_ALL signature")
+            }
         }
     }
 }
@@ -680,7 +687,8 @@ pub unsafe extern "C" fn zsig_pczt_sign(
                 | PcztSignError::TransparentSignFailed
                 | PcztSignError::InvalidRecipientAddress
                 | PcztSignError::SummaryUnavailable
-                | PcztSignError::SummaryOverflow => ZsigError::PcztSignFailed,
+                | PcztSignError::SummaryOverflow
+                | PcztSignError::UnsupportedSighashType => ZsigError::PcztSignFailed,
             };
         }
     };

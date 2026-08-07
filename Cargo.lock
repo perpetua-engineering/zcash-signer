@@ -1538,6 +1538,7 @@ dependencies = [
  "ripemd 0.1.3",
  "sapling-crypto",
  "secp256k1",
+ "serde_json",
  "sha2 0.10.9",
  "sinsemilla",
  "zcash_address",
