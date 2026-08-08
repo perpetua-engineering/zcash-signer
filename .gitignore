@@ -4,7 +4,9 @@
 # Swift Package Manager
 .build/
 .swiftpm/
-Package.resolved
+# Package.resolved is deliberately committed (CR-1493): builds run with
+# --force-resolved-versions, which refuses to resolve at all without it.
+
 # macOS
 .DS_Store
 
