@@ -76,10 +76,57 @@ impl fmt::Display for PcztSignError {
             Self::SummaryUnavailable => write!(f, "PCZT summary unavailable"),
             Self::SummaryOverflow => write!(f, "PCZT summary overflow"),
             Self::UnsupportedSighashType => {
-                write!(f, "transparent input requires a non-SIGHASH_ALL signature")
+                write!(f, "transparent input must use SIGHASH_ALL")
             }
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Sighash policy (CR-1485)
+// -----------------------------------------------------------------------------
+
+/// ZIP-244 `SIGHASH_ALL`. The only sighash type whose transparent signature
+/// commits to the transaction's full output set.
+const SIGHASH_ALL: u8 = 0x01;
+
+/// Refuse a PCZT that asks the watch to sign any transparent input with a
+/// sighash type other than `SIGHASH_ALL` (CR-1485).
+///
+/// `sign_pczt` signs every transparent input with the sighash type the *phone*
+/// put in the PCZT, and `SighashType::parse` accepts `SIGHASH_NONE`,
+/// `SIGHASH_SINGLE`, and `SIGHASH_ANYONECANPAY`. A signature under any of those
+/// does not commit to the outputs `pczt_verify` proves are the approved
+/// recipient plus wallet-owned change, so a compromised phone could collect the
+/// signature and then rewrite the outputs — display≠signed with total loss of
+/// the transparent inputs. Only `SIGHASH_ALL` makes the totality proof binding.
+///
+/// Shared by [`sign_pczt`] (so the signature itself cannot be unbound) and
+/// [`crate::pczt_verify::pczt_verify`] (so the watch refuses before display).
+///
+/// Fail-closed: an unparseable transparent bundle also refuses. That costs
+/// nothing in practice, because `Signer::new` parses the same bundle — a PCZT
+/// that fails here could never have been signed.
+pub(crate) fn enforce_sighash_all(pczt: &pczt::Pczt) -> Result<(), PcztSignError> {
+    if pczt.transparent().inputs().is_empty() {
+        return Ok(());
+    }
+
+    let mut all_sighash_all = true;
+    let result =
+        pczt::roles::verifier::Verifier::new(pczt.clone()).with_transparent(|bundle| {
+            for input in bundle.inputs() {
+                if input.sighash_type().encode() != SIGHASH_ALL {
+                    all_sighash_all = false;
+                }
+            }
+            Ok::<(), pczt::roles::verifier::TransparentError<()>>(())
+        });
+
+    if result.is_err() || !all_sighash_all {
+        return Err(PcztSignError::UnsupportedSighashType);
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -159,6 +206,13 @@ pub fn sign_pczt(
 ) -> Result<Vec<u8>, PcztSignError> {
     // Parse the PCZT binary.
     let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|_| PcztSignError::ParseFailed)?;
+
+    // CR-1485: refuse to produce a transparent signature that does not commit
+    // to the full output set. App-layer verify already calls the same check via
+    // `pczt_verify`, but the signer is the actual place a SIGHASH_NONE signature
+    // would be emitted — enforce here so a bypass of the verify path cannot
+    // mint an unbound signature.
+    enforce_sighash_all(&pczt)?;
 
     // Get spend counts before constructing Signer (which takes ownership).
     let orchard_count = pczt.orchard().actions().len();

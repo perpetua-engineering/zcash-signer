@@ -29,7 +29,7 @@ use pczt::Pczt;
 use serde_json::{json, Value};
 use zcash_address::{ToAddress, ZcashAddress};
 use zcash_protocol::consensus::{BranchId, NetworkType};
-use zcash_signer::pczt_signer::{pczt_summary, PcztSignError};
+use zcash_signer::pczt_signer::{pczt_summary, sign_pczt, PcztSignError, PcztSigningKeys};
 use zcash_signer::pczt_verify::{derive_wallet_viewing_keys, pczt_verify, ApprovedTx, WalletViewingKeys};
 
 /// Mainnet ZEC coin type (SLIP-44).
@@ -307,9 +307,19 @@ fn transparent_input_must_request_sighash_all() {
     let (keys, owned) = wallet_keys();
     let recipient_hash = [0x11u8; 20];
     let recipient = t_address(recipient_hash);
+    // Keys are unused: enforce_sighash_all runs before any key material is
+    // touched. Empty keys prove the refuse is in the signer path itself, not
+    // a side effect of a later sign failure.
+    let empty_signing_keys = PcztSigningKeys {
+        orchard_sk: None,
+        sapling_ask: None,
+        transparent_sk: None,
+    };
 
     // A SIGHASH_NONE signature authorises the inputs without committing to any
-    // output, so every output check above becomes non-binding. Refuse instead.
+    // output, so every output check above becomes non-binding. Refuse instead
+    // — both at verify (before display) and at sign (so the signature itself
+    // cannot be unbound if verify is bypassed).
     for sighash_type in [SIGHASH_NONE, SIGHASH_ALL_ANYONECANPAY] {
         let pczt = build_pczt(&recipient_hash, &owned, |value| {
             value["transparent"]["inputs"][0]["sighash_type"] = json!(sighash_type);
@@ -319,8 +329,16 @@ fn transparent_input_must_request_sighash_all() {
         match pczt_verify(&bytes, &approved_tx(&recipient), &keys) {
             Err(PcztSignError::UnsupportedSighashType) => {}
             other => panic!(
-                "sighash type {sighash_type:#04x} must be refused, got {:?}",
+                "pczt_verify: sighash type {sighash_type:#04x} must be refused, got {:?}",
                 other.map(|verdict| verdict.all_outputs_accounted)
+            ),
+        }
+
+        match sign_pczt(&bytes, &empty_signing_keys) {
+            Err(PcztSignError::UnsupportedSighashType) => {}
+            other => panic!(
+                "sign_pczt: sighash type {sighash_type:#04x} must be refused, got {:?}",
+                other.map(|signed| signed.len())
             ),
         }
     }
