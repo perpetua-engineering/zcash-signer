@@ -32,7 +32,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser", exact: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser", exact: "1.7.1"),
         .package(path: "../zcash-swift-wallet-sdk"),
     ],
     targets: [
