@@ -53,24 +53,24 @@ hex = { version = "0.4", optional = true }
 
 # PCZT (Partially Created Zcash Transaction) support for watch-side signing
 # Uses the full Signer role which computes sighash internally from the PCZT data.
-# Pinned to the NU6.2 librustzcash stack (pczt 0.7 → orchard 0.14 /
-# zcash_primitives 0.28 / zcash_protocol 0.9) — the post-emergency-Orchard-fix
-# release. orchard 0.13.x is yanked (the vulnerable pre-NU6.2 range), so pczt 0.7
-# (which requires orchard ^0.14) is the first PCZT release compatible with NU6.2.
+# Pinned to the NU6.3 librustzcash stack (pczt 0.8 → orchard 0.15 /
+# zcash_primitives 0.30 / zcash_protocol 0.10) — the Ironwood-capable release:
+# v6 transactions, PCZT v2 serialization, distinct Orchard and Ironwood bundles,
+# deferred anchors (ZIP 374), and `sign_ironwood` (CR-1499).
 # Must stay in lockstep with the pczt version used by zcash-light-client-ffi.
-pczt = { version = "0.7", default-features = false, features = ["orchard", "sapling", "transparent", "signer"], optional = true }
+pczt = { version = "0.8", default-features = false, features = ["orchard", "sapling", "transparent", "signer"], optional = true }
 
 # PCZT signing deps: upstream protocol crates for constructing key types in signing callbacks
 # "upstream-orchard" avoids naming conflict with the perpetua fork used by debug-tools
-upstream-orchard = { package = "orchard", version = "0.14", default-features = false, optional = true }
+upstream-orchard = { package = "orchard", version = "0.15", default-features = false, optional = true }
 sapling-crypto = { version = "0.7", default-features = false, optional = true }
-zcash_address = { version = "0.12", default-features = false, optional = true }
-zcash_protocol = { version = "0.9", default-features = false, optional = true }
-zcash_transparent = { version = "0.8", default-features = false, features = ["transparent-inputs"], optional = true }
+zcash_address = { version = "0.13", default-features = false, optional = true }
+zcash_protocol = { version = "0.10", default-features = false, optional = true }
+zcash_transparent = { version = "0.10", default-features = false, features = ["transparent-inputs"], optional = true }
 secp256k1 = { version = "0.29", default-features = false, features = ["alloc"], optional = true }
 # Note trial-decryption / sender memo recovery for PCZT output ownership + memo
-# binding (CR-1337). Matches the version the orchard 0.14 stack links.
-zcash_note_encryption = { version = "0.4", default-features = false, optional = true }
+# binding (CR-1337). Matches the version the orchard 0.15 stack links.
+zcash_note_encryption = { version = "0.4.1", default-features = false, optional = true }
 
 [dev-dependencies]
 # For validation against reference implementations

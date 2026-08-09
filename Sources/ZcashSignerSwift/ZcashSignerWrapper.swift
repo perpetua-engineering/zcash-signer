@@ -944,8 +944,10 @@ public func deriveCombinedUFVKString(
 
 /// Summary information extracted from a PCZT binary
 public struct ZcashPcztInfo {
-    /// Number of Orchard actions (each is a spend + output)
+    /// Number of legacy Orchard actions (each is a spend + output)
     public let orchardActions: UInt32
+    /// Number of Ironwood actions (each is a spend + output, NU6.3+)
+    public let ironwoodActions: UInt32
     /// Number of Sapling spends
     public let saplingSpends: UInt32
     /// Number of transparent inputs
@@ -966,8 +968,10 @@ public struct ZcashPcztSummary {
     public let transparentOutputs: UInt32
     /// Number of Sapling outputs in the PCZT
     public let saplingOutputs: UInt32
-    /// Number of Orchard outputs in the PCZT
+    /// Number of legacy Orchard outputs in the PCZT
     public let orchardOutputs: UInt32
+    /// Number of Ironwood outputs in the PCZT (NU6.3+)
+    public let ironwoodOutputs: UInt32
     /// True when PCZT data hints at the recipient but omits verifier fields
     public let hasUnverifiedRecipientAmount: Bool
 }
@@ -997,6 +1001,7 @@ public func pcztInfo(pcztData: Data) throws -> ZcashPcztInfo {
 
     return ZcashPcztInfo(
         orchardActions: info.orchard_actions,
+        ironwoodActions: info.ironwood_actions,
         saplingSpends: info.sapling_spends,
         transparentInputs: info.transparent_inputs,
         transparentOutputs: info.transparent_outputs
@@ -1045,6 +1050,7 @@ public func pcztSummary(
         transparentOutputs: summary.transparent_outputs,
         saplingOutputs: summary.sapling_outputs,
         orchardOutputs: summary.orchard_outputs,
+        ironwoodOutputs: summary.ironwood_outputs,
         hasUnverifiedRecipientAmount: summary.has_unverified_recipient_amount
     )
 }
@@ -1202,9 +1208,17 @@ public struct ZcashPcztVerdict {
     public let recipientAmountZatoshis: UInt64
     public let walletOwnedOutputAmountZatoshis: UInt64
     public let feeZatoshis: UInt64
+    /// Publicly revealed net value leaving the legacy Orchard pool (pool
+    /// crossing), zatoshis. Non-zero ⇒ the watch must display the crossing
+    /// with its source/destination pools before approval (CR-1499).
+    public let legacyOrchardNetOutflowZatoshis: UInt64
     public let recipientOutputCount: UInt32
     /// Outputs that are neither the recipient nor wallet-owned. > 0 ⇒ REFUSE.
     public let foreignOutputCount: UInt32
+    /// Number of legacy Orchard actions in the signed bytes.
+    public let orchardActionCount: UInt32
+    /// Number of Ironwood actions in the signed bytes (NU6.3+).
+    public let ironwoodActionCount: UInt32
     /// Every output is the approved recipient or provably wallet-owned.
     public let allOutputsAccounted: Bool
     /// The recovered recipient memo equals the approved memo.
@@ -1220,8 +1234,11 @@ private func makeVerdict(_ v: ZsigPcztVerdict) -> ZcashPcztVerdict {
         recipientAmountZatoshis: v.recipient_amount_zatoshis,
         walletOwnedOutputAmountZatoshis: v.wallet_owned_output_amount_zatoshis,
         feeZatoshis: v.fee_zatoshis,
+        legacyOrchardNetOutflowZatoshis: v.legacy_orchard_net_outflow_zatoshis,
         recipientOutputCount: v.recipient_output_count,
         foreignOutputCount: v.foreign_output_count,
+        orchardActionCount: v.orchard_action_count,
+        ironwoodActionCount: v.ironwood_action_count,
         allOutputsAccounted: v.all_outputs_accounted,
         memoMatches: v.memo_matches,
         memoChecked: v.memo_checked,

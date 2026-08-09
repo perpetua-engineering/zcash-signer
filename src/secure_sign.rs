@@ -42,7 +42,10 @@ fn pczt_sign_secure(
 
     // ── 2. Parse the PCZT to see which key types are needed ────────────
     let pczt = pczt::Pczt::parse(pczt_data).map_err(|_| ZsigError::PcztParseFailed)?;
-    let has_orchard = !pczt.orchard().actions().is_empty();
+    // The same ZIP-32 Orchard spending key signs both the legacy Orchard and
+    // Ironwood bundles (CR-1499): an Ironwood-only PCZT still needs it.
+    let has_orchard =
+        !pczt.orchard().actions().is_empty() || !pczt.ironwood().actions().is_empty();
     let has_sapling = !pczt.sapling().spends().is_empty();
     let has_transparent = !pczt.transparent().inputs().is_empty();
     drop(pczt); // Free the parsed PCZT before signing (sign_pczt re-parses)
@@ -94,12 +97,14 @@ fn pczt_sign_secure(
             | PcztSignError::InvalidSaplingKey
             | PcztSignError::InvalidTransparentKey => ZsigError::PcztInvalidKey,
             PcztSignError::OrchardSignFailed
+            | PcztSignError::IronwoodSignFailed
             | PcztSignError::SaplingSignFailed
             | PcztSignError::TransparentSignFailed
             | PcztSignError::InvalidRecipientAddress
             | PcztSignError::SummaryUnavailable
             | PcztSignError::SummaryOverflow
-            | PcztSignError::UnsupportedSighashType => ZsigError::PcztSignFailed,
+            | PcztSignError::UnsupportedSighashType
+            | PcztSignError::EncodeFailed => ZsigError::PcztSignFailed,
         }
     })?;
 

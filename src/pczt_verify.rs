@@ -37,7 +37,9 @@ use upstream_orchard::{
         OutgoingViewingKey as OrchardOvk, PreparedIncomingViewingKey, Scope,
     },
     note::{ExtractedNoteCommitment, Note as OrchardNote, Nullifier},
-    note_encryption::{CompactAction, OrchardDomain},
+    note_encryption::{
+        CompactAction, DomainVersion, IronwoodVersion, NoteEncryptionDomain, OrchardVersion,
+    },
     value::ValueCommitment as OrchardValueCommitment,
     Address as OrchardAddress,
 };
@@ -50,7 +52,7 @@ use sapling_crypto::{
     zip32::DiversifiableFullViewingKey as SaplingDfvk, PaymentAddress as SaplingAddress,
 };
 
-use zcash_protocol::consensus::NetworkType;
+use zcash_protocol::consensus::{BranchId, NetworkType};
 
 use crate::pczt_signer::{PcztSignError, RecipientReceivers};
 
@@ -142,6 +144,19 @@ impl WalletViewingKeys {
 /// Verdict produced by [`pczt_verify`].
 #[derive(Debug, Default)]
 pub struct PcztVerdict {
+    /// Number of legacy Orchard actions in the signed bytes. With
+    /// `ironwood_action_count`, lets the watch display which shielded pools the
+    /// transaction touches, derived from the verified bytes (never from
+    /// phone-supplied display strings).
+    pub orchard_action_count: u32,
+    /// Number of Ironwood actions in the signed bytes.
+    pub ironwood_action_count: u32,
+    /// Publicly revealed net value leaving the legacy Orchard pool (the Orchard
+    /// bundle's committed positive value balance), zatoshis. Non-zero only for
+    /// post-NU6.3 transactions that publicly cross value out of legacy Orchard
+    /// (into Ironwood, transparent, or Sapling); the watch must display this
+    /// crossing amount with its source/destination pools before approval.
+    pub legacy_orchard_net_outflow_zatoshis: u64,
     /// Total value sent to the approved recipient (across all pools), zatoshis.
     pub recipient_amount_zatoshis: u64,
     /// Total positive value sent to wallet-owned non-recipient outputs, zatoshis.
@@ -180,7 +195,9 @@ struct OrchardOutputCiphertext {
     enc: [u8; ENC_CIPHERTEXT_SIZE],
 }
 
-impl ShieldedOutput<OrchardDomain, { ENC_CIPHERTEXT_SIZE }> for OrchardOutputCiphertext {
+impl<V: DomainVersion> ShieldedOutput<NoteEncryptionDomain<V>, { ENC_CIPHERTEXT_SIZE }>
+    for OrchardOutputCiphertext
+{
     fn ephemeral_key(&self) -> EphemeralKeyBytes {
         EphemeralKeyBytes(self.epk.0)
     }
@@ -203,6 +220,19 @@ pub struct ApprovedTx<'a> {
     pub network: NetworkType,
 }
 
+/// True iff this network upgrade carries the Ironwood pool and v6 transactions
+/// (NU6.3 and later). `BranchId` is zcash_protocol's exhaustive exact-ID
+/// registry: an unrecognized wire branch ID never reaches this function.
+fn branch_supports_ironwood(branch: BranchId) -> bool {
+    // Explicit per-upgrade match (not ordering): historical branches keep their
+    // exact behavior, and a future upgrade added to zcash_protocol must be
+    // classified here deliberately before the watch will sign under it.
+    match branch {
+        BranchId::Nu6_3 => true,
+        _ => false,
+    }
+}
+
 /// Verify output totality and memo binding for a PCZT against the approved tx,
 /// using the wallet's viewing keys. Never panics; fail-closed on any decode gap.
 pub fn pczt_verify(
@@ -210,7 +240,13 @@ pub fn pczt_verify(
     approved: &ApprovedTx,
     keys: &WalletViewingKeys,
 ) -> Result<PcztVerdict, PcztSignError> {
-    let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|_| PcztSignError::ParseFailed)?;
+    let mut pczt = pczt::Pczt::parse(pczt_bytes).map_err(|_| PcztSignError::ParseFailed)?;
+    // Resolve derived/compact field representations (absent cv_net, absent cmx,
+    // memo-plaintext enc ciphertexts) once up front. Anything unresolvable
+    // fails closed here, before any display fact is derived from the bytes.
+    pczt.resolve_fields()
+        .map_err(|_| PcztSignError::ParseFailed)?;
+    let pczt = pczt;
     let recipient = RecipientReceivers::parse(approved.recipient_address, approved.network)?;
 
     // CR-1485: everything below proves things about the PCZT's *output set*.
@@ -218,6 +254,22 @@ pub fn pczt_verify(
     // commit to the outputs, so require SIGHASH_ALL before doing the work.
     // (Same check runs in `sign_pczt` so the signature itself cannot be unbound.)
     crate::pczt_signer::enforce_sighash_all(&pczt)?;
+
+    // Exact-ID branch resolution. Unknown or unsupported consensus branch IDs
+    // refuse before any pool is interpreted (CR-1499).
+    let branch = BranchId::try_from(*pczt.global().consensus_branch_id())
+        .map_err(|_| PcztSignError::ParseFailed)?;
+    let ironwood_era = branch_supports_ironwood(branch);
+    // A pre-NU6.3 transaction cannot carry Ironwood data. The pczt crate keeps
+    // the v5 Ironwood slot canonically empty; refuse any value-bearing leak
+    // instead of silently ignoring actions the user would never see.
+    if !ironwood_era
+        && (!pczt.ironwood().actions().is_empty()
+            || *pczt.ironwood().value_sum() != (0, false)
+            || pczt.ironwood().anchor().is_some())
+    {
+        return Err(PcztSignError::ParseFailed);
+    }
 
     let fee = compute_fee(&pczt)?;
 
@@ -247,14 +299,15 @@ pub fn pczt_verify(
         recipient_owned,
         memo_matches: true,
         memo_checked: approved.expected_memo.is_empty(),
+        orchard_action_count: u32::try_from(pczt.orchard().actions().len())
+            .map_err(|_| PcztSignError::SummaryOverflow)?,
+        ironwood_action_count: u32::try_from(pczt.ironwood().actions().len())
+            .map_err(|_| PcztSignError::SummaryOverflow)?,
         ..PcztVerdict::default()
     };
 
     let mut amount: u128 = 0;
     let mut wallet_owned_output_amount: u128 = 0;
-    let mut orchard_output_value: u128 = 0;
-    let (orchard_spend_value, mut orchard_conservation_failed) =
-        authenticated_orchard_spend_total(&pczt, keys)?;
     let orchard_ivks = keys.orchard_prepared_ivks();
     let orchard_ovks = keys.orchard_ovks();
 
@@ -327,18 +380,130 @@ pub fn pczt_verify(
         }
     }
 
-    // ── Orchard outputs (actions) ──────────────────────────────────────────
-    for action in pczt.orchard().actions() {
+    // ── Orchard-protocol pools (legacy Orchard + Ironwood) ─────────────────
+    //
+    // Both bundles share the Orchard action structure; they differ in note
+    // plaintext version (V2 vs V3) and in what post-NU6.3 consensus permits:
+    // no new value may enter legacy Orchard, so in the Ironwood era every
+    // positive-value legacy Orchard output — including one paying the approved
+    // recipient — is a diversion and refuses. Payments to Orchard-protocol
+    // receivers land in the Ironwood bundle instead.
+    let mut scan = OrchardPoolScanState {
+        amount,
+        wallet_owned_output_amount,
+        recipient_receiver: recipient.orchard,
+        approved_memo: approved.expected_memo,
+    };
+
+    let legacy_allows_new_value = !ironwood_era;
+    scan_orchard_protocol_pool::<OrchardVersion>(
+        &pczt,
+        OrchardProtocolPool::Orchard,
+        legacy_allows_new_value,
+        keys,
+        &orchard_ivks,
+        &orchard_ovks,
+        &mut scan,
+        &mut verdict,
+    )?;
+    if ironwood_era {
+        scan_orchard_protocol_pool::<IronwoodVersion>(
+            &pczt,
+            OrchardProtocolPool::Ironwood,
+            true,
+            keys,
+            &orchard_ivks,
+            &orchard_ovks,
+            &mut scan,
+            &mut verdict,
+        )?;
+
+        // Publicly revealed value leaving legacy Orchard (pool crossing). The
+        // committed value balance is a signed consensus field, so this amount is
+        // bound to the signed bytes, not to any phone-supplied description.
+        let committed_orchard_net = signed_orchard_value_sum(*pczt.orchard().value_sum())?;
+        if committed_orchard_net > 0 {
+            verdict.legacy_orchard_net_outflow_zatoshis =
+                u64::try_from(committed_orchard_net).map_err(|_| PcztSignError::SummaryOverflow)?;
+        }
+    }
+
+    amount = scan.amount;
+    wallet_owned_output_amount = scan.wallet_owned_output_amount;
+
+    if amount > u128::from(u64::MAX) || wallet_owned_output_amount > u128::from(u64::MAX) {
+        return Err(PcztSignError::SummaryOverflow);
+    }
+    verdict.recipient_amount_zatoshis = amount as u64;
+    verdict.wallet_owned_output_amount_zatoshis = wallet_owned_output_amount as u64;
+    Ok(verdict)
+}
+
+// -----------------------------------------------------------------------------
+// Orchard-protocol pool scanning (legacy Orchard + Ironwood)
+// -----------------------------------------------------------------------------
+
+/// Which Orchard-protocol pool a scan pass covers.
+#[derive(Clone, Copy, PartialEq)]
+enum OrchardProtocolPool {
+    Orchard,
+    Ironwood,
+}
+
+impl OrchardProtocolPool {
+    fn bundle<'a>(&self, pczt: &'a pczt::Pczt) -> &'a pczt::orchard::Bundle {
+        match self {
+            Self::Orchard => pczt.orchard(),
+            Self::Ironwood => pczt.ironwood(),
+        }
+    }
+}
+
+/// Accumulators shared by the per-pool output scans.
+struct OrchardPoolScanState<'a> {
+    amount: u128,
+    wallet_owned_output_amount: u128,
+    /// The approved recipient's Orchard-protocol receiver (identical raw
+    /// encoding in both pools).
+    recipient_receiver: Option<[u8; 43]>,
+    approved_memo: &'a str,
+}
+
+/// Scan one Orchard-protocol bundle: classify every output as recipient /
+/// wallet-owned / foreign, recover + bind the recipient memo, and enforce value
+/// conservation between authenticated spend values and the committed net value.
+///
+/// `allow_new_value` is false for the legacy Orchard bundle in the Ironwood era
+/// (post-NU6.3 no new value may enter legacy Orchard): any positive-value
+/// output there — recipient-matching or wallet-owned included — is refused as
+/// foreign rather than silently accounted.
+#[allow(clippy::too_many_arguments)]
+fn scan_orchard_protocol_pool<V: DomainVersion>(
+    pczt: &pczt::Pczt,
+    pool: OrchardProtocolPool,
+    allow_new_value: bool,
+    keys: &WalletViewingKeys,
+    ivks: &[PreparedIncomingViewingKey],
+    ovks: &[OrchardOvk],
+    scan: &mut OrchardPoolScanState<'_>,
+    verdict: &mut PcztVerdict,
+) -> Result<(), PcztSignError> {
+    let bundle = pool.bundle(pczt);
+    let mut output_value_total: u128 = 0;
+    let (spend_value_total, mut conservation_failed) =
+        authenticated_orchard_spend_total(pczt, pool, keys)?;
+
+    for action in bundle.actions() {
         let output = action.output();
         let output_value = match output.value() {
             Some(value) => {
-                orchard_output_value = orchard_output_value
+                output_value_total = output_value_total
                     .checked_add(u128::from(*value))
                     .ok_or(PcztSignError::SummaryOverflow)?;
                 Some(*value)
             }
             None => {
-                orchard_conservation_failed = true;
+                conservation_failed = true;
                 None
             }
         };
@@ -346,26 +511,37 @@ pub fn pczt_verify(
             Option::<OrchardAddress>::from(OrchardAddress::from_raw_address_bytes(raw))
         });
 
-        let is_recipient = match (output.recipient(), output_value) {
-            (Some(raw), Some(value)) if recipient.orchard.as_ref() == Some(raw) => {
-                amount = amount
+        let matches_recipient = matches!(
+            (output.recipient(), output_value),
+            (Some(raw), Some(_)) if scan.recipient_receiver.as_ref() == Some(raw)
+        );
+
+        if matches_recipient {
+            if !allow_new_value {
+                // Post-NU6.3, a payment to an Orchard-protocol receiver lands
+                // in Ironwood. A recipient-paying output in the legacy Orchard
+                // bundle is consensus-invalid new value — refuse it instead of
+                // counting it toward the approved amount.
+                verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
+                verdict.all_outputs_accounted = false;
+                continue;
+            }
+            if let Some(value) = output_value {
+                scan.amount = scan
+                    .amount
                     .checked_add(u128::from(value))
                     .ok_or(PcztSignError::SummaryOverflow)?;
-                verdict.recipient_output_count = verdict.recipient_output_count.saturating_add(1);
-                true
             }
-            _ => false,
-        };
+            verdict.recipient_output_count = verdict.recipient_output_count.saturating_add(1);
 
-        if is_recipient {
             // Recover the memo from the signed ciphertext (sender-side, via ock)
             // and bind it to the approved memo. This runs even when the approved
             // memo is empty, so an injected signed memo is refused instead of
             // being treated as "nothing to check".
-            match recover_orchard_memo(action, &orchard_ovks) {
+            match recover_orchard_memo::<V>(action, ovks) {
                 Some(memo) => {
                     verdict.memo_checked = true;
-                    if canonical_memo(&memo) != approved.expected_memo {
+                    if canonical_memo(&memo) != scan.approved_memo {
                         verdict.memo_matches = false;
                     }
                 }
@@ -378,60 +554,75 @@ pub fn pczt_verify(
         }
 
         // Not the recipient: must be wallet-owned (change / self). Dummy
-        // Orchard outputs are represented with value 0, but zero-value metadata
-        // is not trusted by itself: when Orchard spends are present, the
-        // authenticated-spend conservation check below binds those values back
-        // to the committed Orchard net value.
+        // outputs are represented with value 0, but zero-value metadata is not
+        // trusted by itself: when spends are present, the authenticated-spend
+        // conservation check below binds those values back to the committed
+        // net value.
         let has_positive_value = output_value.map(|v| v > 0).unwrap_or(true);
         if has_positive_value {
+            if !allow_new_value {
+                // No new value may enter this pool post-NU6.3: even a
+                // wallet-owned output here could never be created by consensus
+                // — refuse rather than account it.
+                verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
+                verdict.all_outputs_accounted = false;
+                continue;
+            }
             let owned = match parsed_addr.as_ref() {
                 Some(addr) if keys.orchard_owns(addr) => true,
                 // Redacted recipient field: fall back to trial decryption.
-                _ => orchard_action_is_ours(action, &orchard_ivks),
+                _ => orchard_action_is_ours::<V>(action, ivks),
             };
             if !owned {
                 verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
                 verdict.all_outputs_accounted = false;
             } else if let Some(value) = output_value {
-                wallet_owned_output_amount = wallet_owned_output_amount
+                scan.wallet_owned_output_amount = scan
+                    .wallet_owned_output_amount
                     .checked_add(u128::from(value))
                     .ok_or(PcztSignError::SummaryOverflow)?;
             }
         }
     }
 
-    if !pczt.orchard().actions().is_empty() {
-        let metadata_net = signed_delta(orchard_spend_value, orchard_output_value)?;
-        let committed_net = signed_orchard_value_sum(*pczt.orchard().value_sum())?;
-        if orchard_conservation_failed || metadata_net != committed_net {
+    // Value conservation binds the per-action metadata values to the bundle's
+    // committed net value, so a net-neutral "real output described as value 0"
+    // diversion cannot survive.
+    if !bundle.actions().is_empty() {
+        let metadata_net = signed_delta(spend_value_total, output_value_total)?;
+        let committed_net = signed_orchard_value_sum(*bundle.value_sum())?;
+        if conservation_failed || metadata_net != committed_net {
             verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
             verdict.all_outputs_accounted = false;
         }
     }
 
-    if amount > u128::from(u64::MAX) || wallet_owned_output_amount > u128::from(u64::MAX) {
-        return Err(PcztSignError::SummaryOverflow);
-    }
-    verdict.recipient_amount_zatoshis = amount as u64;
-    verdict.wallet_owned_output_amount_zatoshis = wallet_owned_output_amount as u64;
-    Ok(verdict)
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
-// Orchard trial-decryption helpers
+// Orchard-protocol trial-decryption helpers
 // -----------------------------------------------------------------------------
 
 /// Build the note-encryption domain + ciphertext wrapper for a PCZT action's
-/// output. Returns `None` if the ciphertext fields are malformed.
-fn orchard_output_parts(
+/// output. `V` selects the pool's note plaintext version (Orchard V2 or
+/// Ironwood V3). Returns `None` if the ciphertext fields are malformed or
+/// still compacted (fail-closed).
+fn orchard_output_parts<V: DomainVersion>(
     action: &pczt::orchard::Action,
-) -> Option<(OrchardDomain, OrchardOutputCiphertext)> {
+) -> Option<(NoteEncryptionDomain<V>, OrchardOutputCiphertext)> {
     let output = action.output();
     let nf = Option::<Nullifier>::from(Nullifier::from_bytes(action.spend().nullifier()))?;
+    let cmx_bytes = (*output.cmx())?;
     let cmx =
-        Option::<ExtractedNoteCommitment>::from(ExtractedNoteCommitment::from_bytes(output.cmx()))?;
+        Option::<ExtractedNoteCommitment>::from(ExtractedNoteCommitment::from_bytes(&cmx_bytes))?;
     let epk_bytes = *output.ephemeral_key();
-    let enc_vec = output.enc_ciphertext();
+    // `resolve_fields` restores memo-plaintext representations to encrypted
+    // form; anything still unresolved here cannot be verified — fail closed.
+    let enc_vec = match output.enc_ciphertext() {
+        pczt::orchard::EncCiphertext::Encrypted(bytes) => bytes,
+        pczt::orchard::EncCiphertext::MemoPlaintext(_) => return None,
+    };
     if enc_vec.len() != ENC_CIPHERTEXT_SIZE {
         return None;
     }
@@ -441,10 +632,10 @@ fn orchard_output_parts(
     let mut compact = [0u8; 52];
     compact.copy_from_slice(&enc[..52]);
     let compact_action = CompactAction::from_parts(nf, cmx, EphemeralKeyBytes(epk_bytes), compact);
-    let domain = OrchardDomain::for_compact_action(&compact_action);
+    let domain = NoteEncryptionDomain::<V>::for_compact_action(&compact_action);
     let wrapper = OrchardOutputCiphertext {
         epk: EphemeralKeyBytes(epk_bytes),
-        cmx: *output.cmx(),
+        cmx: cmx_bytes,
         enc,
     };
     Some((domain, wrapper))
@@ -452,11 +643,11 @@ fn orchard_output_parts(
 
 /// True iff the action's output note decrypts under one of our incoming viewing
 /// keys (external or internal/change scope) — i.e. it is wallet-owned.
-fn orchard_action_is_ours(
+fn orchard_action_is_ours<V: DomainVersion>(
     action: &pczt::orchard::Action,
     ivks: &[PreparedIncomingViewingKey],
 ) -> bool {
-    let Some((domain, wrapper)) = orchard_output_parts(action) else {
+    let Some((domain, wrapper)) = orchard_output_parts::<V>(action) else {
         return false;
     };
     ivks.iter()
@@ -465,12 +656,14 @@ fn orchard_action_is_ours(
 
 fn authenticated_orchard_spend_total(
     pczt: &pczt::Pczt,
+    pool: OrchardProtocolPool,
     keys: &WalletViewingKeys,
 ) -> Result<(u128, bool), PcztSignError> {
     let mut total = 0u128;
     let mut failed = false;
 
-    let result = pczt::roles::verifier::Verifier::new(pczt.clone()).with_orchard(|bundle| {
+    let verifier = pczt::roles::verifier::Verifier::new(pczt.clone());
+    let closure = |bundle: &upstream_orchard::pczt::Bundle| {
         for action in bundle.actions() {
             match authenticated_orchard_spend_value(action, keys) {
                 Ok(value) => {
@@ -484,7 +677,11 @@ fn authenticated_orchard_spend_total(
             }
         }
         Ok::<(), pczt::roles::verifier::OrchardError<()>>(())
-    });
+    };
+    let result = match pool {
+        OrchardProtocolPool::Orchard => verifier.with_orchard(closure).map(|_| ()),
+        OrchardProtocolPool::Ironwood => verifier.with_ironwood(closure).map(|_| ()),
+    };
 
     if result.is_err() {
         failed = true;
@@ -493,12 +690,14 @@ fn authenticated_orchard_spend_total(
     Ok((total, failed))
 }
 
-/// Returns the authenticated Orchard spend value for this action.
+/// Returns the authenticated Orchard-protocol spend value for this action.
 ///
 /// The value is trusted only after reconstructing the spent note from the PCZT
 /// spend fields and recomputing its nullifier with our FVK. This binds the
 /// phone-provided spend value to a consensus field that the transaction reveals,
-/// closing the net-neutral "real output described as value 0" attack.
+/// closing the net-neutral "real output described as value 0" attack. The
+/// spent note's plaintext version comes from the parsed spend itself (legacy
+/// Orchard V2 vs Ironwood V3 note commitments differ).
 fn authenticated_orchard_spend_value(
     action: &upstream_orchard::pczt::Action,
     keys: &WalletViewingKeys,
@@ -523,9 +722,13 @@ fn authenticated_orchard_spend_value(
     let Some(rseed) = *spend.rseed() else {
         return Err(());
     };
-    let Some(note) =
-        Option::<OrchardNote>::from(OrchardNote::from_parts(recipient, value, rho, rseed))
-    else {
+    let Some(note) = Option::<OrchardNote>::from(OrchardNote::from_parts(
+        recipient,
+        value,
+        rho,
+        rseed,
+        *spend.note_version(),
+    )) else {
         return Err(());
     };
 
@@ -536,11 +739,15 @@ fn authenticated_orchard_spend_value(
 }
 
 /// Recover the recipient note's memo as the *sender* using our outgoing viewing
-/// keys. Orchard derives the outgoing cipher key from `ovk`, the action's value
-/// commitment (`cv_net`), cmx and epk, so we reconstruct `cv` from `cv_net` and
-/// try each scope's OVK. Returns the raw 512-byte memo if recovered.
-fn recover_orchard_memo(action: &pczt::orchard::Action, ovks: &[OrchardOvk]) -> Option<[u8; 512]> {
-    let (domain, wrapper) = orchard_output_parts(action)?;
+/// keys. The Orchard protocol derives the outgoing cipher key from `ovk`, the
+/// action's value commitment (`cv_net`), cmx and epk, so we reconstruct `cv`
+/// from `cv_net` and try each scope's OVK. Returns the raw 512-byte memo if
+/// recovered.
+fn recover_orchard_memo<V: DomainVersion>(
+    action: &pczt::orchard::Action,
+    ovks: &[OrchardOvk],
+) -> Option<[u8; 512]> {
+    let (domain, wrapper) = orchard_output_parts::<V>(action)?;
     let output = action.output();
     let out_vec = output.out_ciphertext();
     if out_vec.len() != OUT_CIPHERTEXT_SIZE {
@@ -549,9 +756,8 @@ fn recover_orchard_memo(action: &pczt::orchard::Action, ovks: &[OrchardOvk]) -> 
     let mut out_ct = [0u8; OUT_CIPHERTEXT_SIZE];
     out_ct.copy_from_slice(out_vec);
 
-    let cv = Option::<OrchardValueCommitment>::from(OrchardValueCommitment::from_bytes(
-        action.cv_net(),
-    ))?;
+    let cv_bytes = (*action.cv_net())?;
+    let cv = Option::<OrchardValueCommitment>::from(OrchardValueCommitment::from_bytes(&cv_bytes))?;
 
     for ovk in ovks {
         if let Some((_, _, memo)) =
@@ -623,9 +829,11 @@ fn compute_fee(pczt: &pczt::Pczt) -> Result<u64, PcztSignError> {
         .ok_or(PcztSignError::SummaryOverflow)?;
 
     let orchard = signed_orchard_value_sum(*pczt.orchard().value_sum())?;
+    let ironwood = signed_orchard_value_sum(*pczt.ironwood().value_sum())?;
     let sapling = *pczt.sapling().value_sum();
     let fee = transparent_balance
         .checked_add(orchard)
+        .and_then(|v| v.checked_add(ironwood))
         .and_then(|v| v.checked_add(sapling))
         .ok_or(PcztSignError::SummaryOverflow)?;
     if fee < 0 || fee > i128::from(u64::MAX) {
@@ -674,8 +882,16 @@ pub struct ZsigPcztVerdict {
     pub recipient_amount_zatoshis: u64,
     pub wallet_owned_output_amount_zatoshis: u64,
     pub fee_zatoshis: u64,
+    /// Publicly revealed net value leaving the legacy Orchard pool (pool
+    /// crossing), zatoshis. Non-zero ⇒ the watch must display the crossing
+    /// with source/destination pools before approval (CR-1499).
+    pub legacy_orchard_net_outflow_zatoshis: u64,
     pub recipient_output_count: u32,
     pub foreign_output_count: u32,
+    /// Number of legacy Orchard actions in the signed bytes.
+    pub orchard_action_count: u32,
+    /// Number of Ironwood actions in the signed bytes.
+    pub ironwood_action_count: u32,
     /// 1 iff every output is the approved recipient or wallet-owned.
     pub all_outputs_accounted: bool,
     /// 1 iff the recipient memo was recovered and matched the approved memo.
@@ -721,8 +937,12 @@ pub(crate) fn verify_ffi_common(
                 (*out).wallet_owned_output_amount_zatoshis =
                     verdict.wallet_owned_output_amount_zatoshis;
                 (*out).fee_zatoshis = verdict.fee_zatoshis;
+                (*out).legacy_orchard_net_outflow_zatoshis =
+                    verdict.legacy_orchard_net_outflow_zatoshis;
                 (*out).recipient_output_count = verdict.recipient_output_count;
                 (*out).foreign_output_count = verdict.foreign_output_count;
+                (*out).orchard_action_count = verdict.orchard_action_count;
+                (*out).ironwood_action_count = verdict.ironwood_action_count;
                 (*out).all_outputs_accounted = verdict.all_outputs_accounted;
                 (*out).memo_matches = verdict.memo_matches;
                 (*out).memo_checked = verdict.memo_checked;
@@ -828,9 +1048,27 @@ mod tests {
     use zcash_protocol::consensus::BranchId;
 
     fn empty_pczt() -> alloc::vec::Vec<u8> {
-        Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+        Creator::new(
+            BranchId::Nu6.into(),
+            10_000_000,
+            133,
+            Some([0; 32]),
+            Some([0; 32]),
+        )
+        .expect("creator accepts NU6")
+        .build()
+        .expect("empty v5 pczt builds")
+        .serialize()
+        .expect("empty v5 pczt serializes")
+    }
+
+    fn empty_v6_pczt() -> alloc::vec::Vec<u8> {
+        Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, None, None)
+            .expect("creator accepts NU6.3")
             .build()
+            .expect("empty v6 pczt builds")
             .serialize()
+            .expect("empty v6 pczt serializes")
     }
 
     #[test]
@@ -902,6 +1140,38 @@ mod tests {
         assert_eq!(verdict.recipient_output_count, 0);
         assert_eq!(verdict.foreign_output_count, 0);
         assert!(verdict.all_outputs_accounted);
+        assert_eq!(verdict.orchard_action_count, 0);
+        assert_eq!(verdict.ironwood_action_count, 0);
+        assert_eq!(verdict.legacy_orchard_net_outflow_zatoshis, 0);
+    }
+
+    #[test]
+    fn verify_empty_v6_pczt_verifies_with_no_crossing() {
+        // A v6 (NU6.3) PCZT with empty bundles verifies vacuously: no Ironwood
+        // actions, no legacy Orchard outflow, totality holds.
+        let pczt = empty_v6_pczt();
+        let keys = WalletViewingKeys {
+            orchard_fvk: None,
+            sapling_dfvk: None,
+            transparent_p2pkh: alloc::vec::Vec::new(),
+        };
+        let approved = ApprovedTx {
+            recipient_address: "t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs",
+            expected_amount_zatoshis: 0,
+            expected_memo: "",
+            network: NetworkType::Main,
+        };
+        let verdict = pczt_verify(&pczt, &approved, &keys).expect("empty v6 pczt verifies");
+        assert!(verdict.all_outputs_accounted);
+        assert_eq!(verdict.ironwood_action_count, 0);
+        assert_eq!(verdict.legacy_orchard_net_outflow_zatoshis, 0);
+    }
+
+    #[test]
+    fn branch_capability_is_exact_per_upgrade() {
+        assert!(branch_supports_ironwood(BranchId::Nu6_3));
+        assert!(!branch_supports_ironwood(BranchId::Nu6_2));
+        assert!(!branch_supports_ironwood(BranchId::Nu5));
     }
 
     #[test]

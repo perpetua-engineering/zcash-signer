@@ -1,0 +1,8 @@
+# The NU6.3 dependency stack (pczt 0.8 / orchard 0.15 / zcash_protocol 0.10)
+# requires rustc 1.88+, and the watchOS tier-3 targets require nightly
+# (-Zbuild-std). Pin the whole crate to the installed `nightly` toolchain so
+# every entry point — build-xcframework.sh, tools/build (apple + android), and
+# plain `cargo test` — resolves the same toolchain instead of an older
+# environment default (CR-1499).
+[toolchain]
+channel = "nightly"

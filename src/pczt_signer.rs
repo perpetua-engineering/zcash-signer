@@ -1,12 +1,17 @@
 //! PCZT (Partially Created Zcash Transaction) signing module.
 //!
 //! Uses the pczt crate's full `Signer` role to parse PCZT binary,
-//! compute the sighash internally, sign all spend types (Orchard/Sapling/
-//! transparent), and return signed PCZT bytes.
+//! compute the sighash internally, sign all spend types (Orchard/Ironwood/
+//! Sapling/transparent), and return signed PCZT bytes.
 //!
 //! The watch receives PCZT bytes from the phone, signs with locally-held
 //! spending keys, and returns the signed PCZT. The sighash is computed
 //! from the PCZT data itself — no external sighash parameter needed.
+//!
+//! NU6.3 (CR-1499): v6 transactions carry a distinct Ironwood bundle alongside
+//! the legacy Orchard bundle. Both are Orchard-protocol bundles (same action
+//! structure and spend authorization scheme, note plaintext V3 vs V2), signed
+//! with the same ZIP-32 Orchard spend authorizing key via `sign_ironwood`.
 
 use alloc::vec::Vec;
 use core::{convert::Infallible, fmt, str};
@@ -50,6 +55,8 @@ pub enum PcztSignError {
     SaplingSignFailed,
     /// Transparent signing failed.
     TransparentSignFailed,
+    /// Ironwood signing failed.
+    IronwoodSignFailed,
     /// Recipient address could not be parsed for summary verification.
     InvalidRecipientAddress,
     /// PCZT values needed for summary verification are unavailable.
@@ -60,6 +67,9 @@ pub enum PcztSignError {
     /// `SIGHASH_ALL`, so its signature would not commit to the output set the
     /// watch just verified (CR-1485).
     UnsupportedSighashType,
+    /// The signed PCZT could not be re-encoded (pczt 0.8 serialization is
+    /// fallible: v1 cannot represent v6/Ironwood data).
+    EncodeFailed,
 }
 
 impl fmt::Display for PcztSignError {
@@ -72,12 +82,14 @@ impl fmt::Display for PcztSignError {
             Self::OrchardSignFailed => write!(f, "Orchard signing failed"),
             Self::SaplingSignFailed => write!(f, "Sapling signing failed"),
             Self::TransparentSignFailed => write!(f, "transparent signing failed"),
+            Self::IronwoodSignFailed => write!(f, "Ironwood signing failed"),
             Self::InvalidRecipientAddress => write!(f, "invalid recipient address"),
             Self::SummaryUnavailable => write!(f, "PCZT summary unavailable"),
             Self::SummaryOverflow => write!(f, "PCZT summary overflow"),
             Self::UnsupportedSighashType => {
                 write!(f, "transparent input must use SIGHASH_ALL")
             }
+            Self::EncodeFailed => write!(f, "failed to encode signed PCZT"),
         }
     }
 }
@@ -216,13 +228,15 @@ pub fn sign_pczt(
 
     // Get spend counts before constructing Signer (which takes ownership).
     let orchard_count = pczt.orchard().actions().len();
+    let ironwood_count = pczt.ironwood().actions().len();
     let sapling_count = pczt.sapling().spends().len();
     let transparent_count = pczt.transparent().inputs().len();
 
     // Create the full Signer (computes sighash from PCZT data).
     let mut signer = Signer::new(pczt).map_err(|_| PcztSignError::ParseFailed)?;
 
-    // Sign Orchard spends if we have an Orchard key.
+    // Sign Orchard-protocol spends (legacy Orchard and Ironwood bundles) if we
+    // have an Orchard key. Both pools use the same ZIP-32 spend authorizing key.
     if let Some(sk_bytes) = keys.orchard_sk {
         let sk = OrchardSpendingKey::from_bytes(*sk_bytes);
         let sk: OrchardSpendingKey =
@@ -242,6 +256,18 @@ pub fn sign_pczt(
                     // Dummy spend or action we don't own — skip.
                 }
                 Err(_) => return Err(PcztSignError::OrchardSignFailed),
+            }
+        }
+
+        for i in 0..ironwood_count {
+            match signer.sign_ironwood(i, &ask) {
+                Ok(()) => {}
+                Err(pczt::roles::signer::Error::IronwoodSign(
+                    upstream_orchard::pczt::SignerError::WrongSpendAuthorizingKey,
+                )) => {
+                    // Dummy spend or action we don't own — skip.
+                }
+                Err(_) => return Err(PcztSignError::IronwoodSignFailed),
             }
         }
     }
@@ -275,19 +301,25 @@ pub fn sign_pczt(
         }
     }
 
-    // Finalize and serialize.
+    // Finalize and serialize. pczt 0.8 serialization is fallible (the v1
+    // format cannot carry v6/Ironwood data); fail closed rather than return
+    // truncated bytes.
     let signed_pczt = signer.finish();
-    Ok(signed_pczt.serialize())
+    signed_pczt
+        .serialize()
+        .map_err(|_| PcztSignError::EncodeFailed)
 }
 
 /// Extract summary information from a PCZT for display on the watch before signing.
 ///
-/// Returns the number of Orchard actions, Sapling spends, and transparent inputs.
+/// Returns the number of Orchard actions, Ironwood actions, Sapling spends, and
+/// transparent inputs.
 pub fn pczt_info(pczt_bytes: &[u8]) -> Result<PcztInfo, PcztSignError> {
     let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|_| PcztSignError::ParseFailed)?;
 
     Ok(PcztInfo {
         orchard_actions: pczt.orchard().actions().len(),
+        ironwood_actions: pczt.ironwood().actions().len(),
         sapling_spends: pczt.sapling().spends().len(),
         transparent_inputs: pczt.transparent().inputs().len(),
         transparent_outputs: pczt.transparent().outputs().len(),
@@ -323,9 +355,11 @@ pub fn pczt_summary(
         .ok_or(PcztSignError::SummaryOverflow)?;
 
     let orchard_value_sum = signed_orchard_value_sum(*pczt.orchard().value_sum())?;
+    let ironwood_value_sum = signed_orchard_value_sum(*pczt.ironwood().value_sum())?;
     let sapling_value_sum = *pczt.sapling().value_sum();
     let fee = transparent_balance
         .checked_add(orchard_value_sum)
+        .and_then(|value| value.checked_add(ironwood_value_sum))
         .and_then(|value| value.checked_add(sapling_value_sum))
         .ok_or(PcztSignError::SummaryOverflow)?;
     if fee < 0 || fee > i128::from(u64::MAX) {
@@ -368,7 +402,10 @@ pub fn pczt_summary(
         }
     }
 
-    for action in pczt.orchard().actions() {
+    // An Orchard-protocol receiver is the same 43-byte raw encoding in both the
+    // legacy Orchard and Ironwood bundles: post-NU6.3 a payment to an existing
+    // Orchard receiver lands in Ironwood, so match the recipient in both pools.
+    for action in pczt.orchard().actions().iter().chain(pczt.ironwood().actions()) {
         let output = action.output();
         match (output.recipient(), output.value()) {
             (Some(output_recipient), Some(value))
@@ -399,6 +436,7 @@ pub fn pczt_summary(
         transparent_outputs: pczt.transparent().outputs().len() as u32,
         sapling_outputs: pczt.sapling().outputs().len() as u32,
         orchard_outputs: pczt.orchard().actions().len() as u32,
+        ironwood_outputs: pczt.ironwood().actions().len() as u32,
         has_unverified_recipient_amount,
     })
 }
@@ -406,8 +444,10 @@ pub fn pczt_summary(
 /// Summary information extracted from a PCZT.
 #[derive(Debug)]
 pub struct PcztInfo {
-    /// Number of Orchard actions (each is a spend + output).
+    /// Number of legacy Orchard actions (each is a spend + output).
     pub orchard_actions: usize,
+    /// Number of Ironwood actions (each is a spend + output).
+    pub ironwood_actions: usize,
     /// Number of Sapling spends.
     pub sapling_spends: usize,
     /// Number of transparent inputs.
@@ -425,6 +465,7 @@ pub struct PcztSummary {
     pub transparent_outputs: u32,
     pub sapling_outputs: u32,
     pub orchard_outputs: u32,
+    pub ironwood_outputs: u32,
     pub has_unverified_recipient_amount: bool,
 }
 
@@ -547,6 +588,7 @@ use crate::ZsigError;
 #[repr(C)]
 pub struct ZsigPcztInfo {
     pub orchard_actions: u32,
+    pub ironwood_actions: u32,
     pub sapling_spends: u32,
     pub transparent_inputs: u32,
     pub transparent_outputs: u32,
@@ -561,6 +603,7 @@ pub struct ZsigPcztSummary {
     pub transparent_outputs: u32,
     pub sapling_outputs: u32,
     pub orchard_outputs: u32,
+    pub ironwood_outputs: u32,
     pub has_unverified_recipient_amount: bool,
 }
 
@@ -590,6 +633,7 @@ pub unsafe extern "C" fn zsig_pczt_info(
     match pczt_info(pczt_bytes) {
         Ok(info) => {
             (*info_out).orchard_actions = info.orchard_actions as u32;
+            (*info_out).ironwood_actions = info.ironwood_actions as u32;
             (*info_out).sapling_spends = info.sapling_spends as u32;
             (*info_out).transparent_inputs = info.transparent_inputs as u32;
             (*info_out).transparent_outputs = info.transparent_outputs as u32;
@@ -644,6 +688,7 @@ pub unsafe extern "C" fn zsig_pczt_summary(
             (*summary_out).transparent_outputs = summary.transparent_outputs;
             (*summary_out).sapling_outputs = summary.sapling_outputs;
             (*summary_out).orchard_outputs = summary.orchard_outputs;
+            (*summary_out).ironwood_outputs = summary.ironwood_outputs;
             (*summary_out).has_unverified_recipient_amount =
                 summary.has_unverified_recipient_amount;
             ZsigError::Success
@@ -737,12 +782,14 @@ pub unsafe extern "C" fn zsig_pczt_sign(
                 | PcztSignError::InvalidSaplingKey
                 | PcztSignError::InvalidTransparentKey => ZsigError::PcztInvalidKey,
                 PcztSignError::OrchardSignFailed
+                | PcztSignError::IronwoodSignFailed
                 | PcztSignError::SaplingSignFailed
                 | PcztSignError::TransparentSignFailed
                 | PcztSignError::InvalidRecipientAddress
                 | PcztSignError::SummaryUnavailable
                 | PcztSignError::SummaryOverflow
-                | PcztSignError::UnsupportedSighashType => ZsigError::PcztSignFailed,
+                | PcztSignError::UnsupportedSighashType
+                | PcztSignError::EncodeFailed => ZsigError::PcztSignFailed,
             };
         }
     };

@@ -156,9 +156,12 @@ fn entrypoints_survive_random_bytes() {
 fn entrypoints_survive_pczt_magic_prefixed_garbage() {
     // The parser keys off a magic prefix; feeding well-formed-looking headers
     // with random tails reaches deeper into the decoder than pure noise.
-    let magic = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+    let magic = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, Some([0; 32]), Some([0; 32]))
+        .expect("creator accepts NU6")
         .build()
-        .serialize();
+        .expect("empty PCZT builds")
+        .serialize()
+        .expect("empty PCZT serializes");
     let prefix = &magic[..magic.len().min(8)];
 
     let (keys, orchard_sk) = fuzz_keys();
@@ -176,9 +179,12 @@ fn entrypoints_survive_bit_flipped_valid_pczt() {
     // Start from a real, parseable PCZT and corrupt it the way a flaky or
     // hostile transport would: single bit flips, byte zeroing, truncation,
     // and duplication. Each mutant must still terminate cleanly.
-    let valid = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+    let valid = Creator::new(BranchId::Nu6.into(), 10_000_000, 133, Some([0; 32]), Some([0; 32]))
+        .expect("creator accepts NU6")
         .build()
-        .serialize();
+        .expect("empty PCZT builds")
+        .serialize()
+        .expect("empty PCZT serializes");
     assert!(pczt_info(&valid).is_ok(), "baseline PCZT must parse");
 
     let (keys, orchard_sk) = fuzz_keys();

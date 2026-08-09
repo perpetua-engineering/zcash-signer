@@ -11,9 +11,21 @@ use zcash_protocol::consensus::BranchId;
 use zcash_signer::pczt_signer::{pczt_info, sign_pczt, PcztSignError, PcztSigningKeys};
 
 fn empty_pczt_bytes() -> Vec<u8> {
-    Creator::new(BranchId::Nu6.into(), 10_000_000, 133, [0; 32], [0; 32])
+    Creator::new(BranchId::Nu6.into(), 10_000_000, 133, Some([0; 32]), Some([0; 32]))
+        .expect("creator accepts NU6")
         .build()
+        .expect("empty v5 PCZT builds")
         .serialize()
+        .expect("empty v5 PCZT serializes")
+}
+
+fn empty_v6_pczt_bytes() -> Vec<u8> {
+    Creator::new(BranchId::Nu6_3.into(), 10_000_000, 133, None, None)
+        .expect("creator accepts NU6.3")
+        .build()
+        .expect("empty v6 PCZT builds")
+        .serialize()
+        .expect("empty v6 PCZT serializes")
 }
 
 fn no_signing_keys<'a>() -> PcztSigningKeys<'a> {
@@ -30,9 +42,32 @@ fn pczt_info_parses_real_serialized_pczt() {
     let info = pczt_info(&pczt).expect("empty creator PCZT should parse");
 
     assert_eq!(info.orchard_actions, 0);
+    assert_eq!(info.ironwood_actions, 0);
     assert_eq!(info.sapling_spends, 0);
     assert_eq!(info.transparent_inputs, 0);
     assert_eq!(info.transparent_outputs, 0);
+}
+
+#[test]
+fn pczt_info_parses_v6_pczt() {
+    // NU6.3 selects the v6 transaction format, which carries an Ironwood bundle.
+    let pczt = empty_v6_pczt_bytes();
+    let info = pczt_info(&pczt).expect("empty v6 creator PCZT should parse");
+
+    assert_eq!(info.orchard_actions, 0);
+    assert_eq!(info.ironwood_actions, 0);
+    assert_eq!(info.sapling_spends, 0);
+}
+
+#[test]
+fn sign_pczt_handles_v6_pczt_without_spends() {
+    let pczt = empty_v6_pczt_bytes();
+    let signed = sign_pczt(&pczt, &no_signing_keys())
+        .expect("empty v6 creator PCZT should be a no-op signer pass");
+    let info = pczt_info(&signed).expect("signed v6 PCZT should remain parseable");
+
+    assert_eq!(info.orchard_actions, 0);
+    assert_eq!(info.ironwood_actions, 0);
 }
 
 #[test]
