@@ -144,6 +144,10 @@ impl WalletViewingKeys {
 /// Verdict produced by [`pczt_verify`].
 #[derive(Debug, Default)]
 pub struct PcztVerdict {
+    /// Transaction expiry height committed by the signed PCZT bytes. The watch
+    /// must display this before approval so a phone cannot substitute a
+    /// different validity window after the user reviews the transaction.
+    pub expiry_height: u32,
     /// Number of legacy Orchard actions in the signed bytes. With
     /// `ironwood_action_count`, lets the watch display which shielded pools the
     /// transaction touches, derived from the verified bytes (never from
@@ -294,6 +298,7 @@ pub fn pczt_verify(
             .unwrap_or(false);
 
     let mut verdict = PcztVerdict {
+        expiry_height: *pczt.global().expiry_height(),
         fee_zatoshis: fee,
         all_outputs_accounted: true,
         recipient_owned,
@@ -901,6 +906,8 @@ pub struct ZsigPcztVerdict {
     /// 1 iff the approved recipient is itself wallet-owned (ZEC-4: required for
     /// shielding self-sends).
     pub recipient_owned: bool,
+    /// Transaction expiry height committed by the signed PCZT bytes.
+    pub expiry_height: u32,
 }
 
 /// Maximum PCZT payload size (1 MB).
@@ -947,6 +954,7 @@ pub(crate) fn verify_ffi_common(
                 (*out).memo_matches = verdict.memo_matches;
                 (*out).memo_checked = verdict.memo_checked;
                 (*out).recipient_owned = verdict.recipient_owned;
+                (*out).expiry_height = verdict.expiry_height;
             }
             crate::ZsigError::Success
         }
@@ -1143,6 +1151,7 @@ mod tests {
         assert_eq!(verdict.orchard_action_count, 0);
         assert_eq!(verdict.ironwood_action_count, 0);
         assert_eq!(verdict.legacy_orchard_net_outflow_zatoshis, 0);
+        assert_eq!(verdict.expiry_height, 10_000_000);
     }
 
     #[test]
@@ -1165,6 +1174,7 @@ mod tests {
         assert!(verdict.all_outputs_accounted);
         assert_eq!(verdict.ironwood_action_count, 0);
         assert_eq!(verdict.legacy_orchard_net_outflow_zatoshis, 0);
+        assert_eq!(verdict.expiry_height, 10_000_000);
     }
 
     #[test]

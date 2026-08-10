@@ -1227,6 +1227,8 @@ public struct ZcashPcztVerdict {
     public let memoChecked: Bool
     /// The approved recipient is itself wallet-owned (ZEC-4 shielding gate).
     public let recipientOwned: Bool
+    /// Transaction expiry height committed by the signed PCZT bytes.
+    public let expiryHeight: UInt32
 }
 
 private func makeVerdict(_ v: ZsigPcztVerdict) -> ZcashPcztVerdict {
@@ -1242,7 +1244,8 @@ private func makeVerdict(_ v: ZsigPcztVerdict) -> ZcashPcztVerdict {
         allOutputsAccounted: v.all_outputs_accounted,
         memoMatches: v.memo_matches,
         memoChecked: v.memo_checked,
-        recipientOwned: v.recipient_owned
+        recipientOwned: v.recipient_owned,
+        expiryHeight: v.expiry_height
     )
 }
 

@@ -485,6 +485,32 @@ fn v6_transparent_mutations_remain_visible_to_the_watch() {
 }
 
 #[test]
+fn v6_expiry_height_mutation_is_visible_to_the_watch() {
+    // Expiry is consequential approval data: changing it after the watch fixed
+    // its display must change the byte-derived verdict shown before approval.
+    let (keys, owned) = wallet_keys();
+    let recipient_hash = FOREIGN_HASH;
+    let recipient = t_address(recipient_hash);
+
+    let baseline = build_v6_pczt(&recipient_hash, &owned, |_| {});
+    let baseline_verdict =
+        pczt_verify(&wire(baseline), &approved_tx(&recipient), &keys).expect("baseline verdict");
+
+    let mutated = build_v6_pczt(&recipient_hash, &owned, |value| {
+        value["global"]["expiry_height"] = json!(9_999_999u32);
+    });
+    let mutated_verdict =
+        pczt_verify(&wire(mutated), &approved_tx(&recipient), &keys).expect("mutated verdict");
+
+    assert_eq!(baseline_verdict.expiry_height, 10_000_000);
+    assert_eq!(mutated_verdict.expiry_height, 9_999_999);
+    assert_ne!(
+        baseline_verdict.expiry_height,
+        mutated_verdict.expiry_height
+    );
+}
+
+#[test]
 fn ironwood_value_sum_mutation_shifts_the_fee() {
     // The Ironwood bundle's committed value balance participates in the fee
     // equation. A phone that injects a positive Ironwood balance (value quietly

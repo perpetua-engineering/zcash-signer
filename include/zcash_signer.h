@@ -907,6 +907,7 @@ typedef struct {
     bool memo_matches;           /* recovered recipient memo == approved */
     bool memo_checked;           /* a memo comparison was performed */
     bool recipient_owned;        /* recipient is wallet-owned (ZEC-4 shielding) */
+    uint32_t expiry_height;      /* signed transaction expiry block */
 } ZsigPcztVerdict;
 
 /*
