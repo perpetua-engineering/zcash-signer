@@ -25,6 +25,12 @@
 //! approved recipient's memo is recovered from the signed note ciphertext and
 //! compared to the approved memo.
 //!
+//! Post-NU6.3 (CR-1499 / CR-1507): external Orchard-protocol payments land in
+//! Ironwood, but wallet-owned **change may return to legacy Orchard** when the
+//! transaction also spends Orchard notes and the pool's net value decreases
+//! (the Orchard turnstile). Verifiers must classify that change as wallet-owned
+//! rather than foreign, and still refuse net Orchard *inflow*.
+//!
 //! Fail-closed: a missing field, an unparseable address, or an output we cannot
 //! account for all resolve to "not owned" ⇒ the verdict refuses signing.
 
@@ -389,10 +395,13 @@ pub fn pczt_verify(
     //
     // Both bundles share the Orchard action structure; they differ in note
     // plaintext version (V2 vs V3) and in what post-NU6.3 consensus permits:
-    // no new value may enter legacy Orchard, so in the Ironwood era every
-    // positive-value legacy Orchard output — including one paying the approved
-    // recipient — is a diversion and refuses. Payments to Orchard-protocol
-    // receivers land in the Ironwood bundle instead.
+    //
+    // * External payments to Orchard-protocol receivers land in Ironwood, so a
+    //   recipient-matching output in the legacy Orchard bundle is refused.
+    // * Wallet-owned change may return to legacy Orchard when Orchard notes are
+    //   spent and net pool value strictly decreases (NU6.3 turnstile). That
+    //   change must classify as wallet-owned, not foreign (CR-1507).
+    // * Net Orchard *inflow* (committed value balance < 0) is still refused.
     let mut scan = OrchardPoolScanState {
         amount,
         wallet_owned_output_amount,
@@ -400,11 +409,13 @@ pub fn pczt_verify(
         approved_memo: approved.expected_memo,
     };
 
-    let legacy_allows_new_value = !ironwood_era;
+    // `legacy_allows_external_payment`: post-NU6.3, Orchard-protocol payments
+    // must use the Ironwood bundle. Change (wallet-owned) is handled separately.
+    let legacy_allows_external_payment = !ironwood_era;
     scan_orchard_protocol_pool::<OrchardVersion>(
         &pczt,
         OrchardProtocolPool::Orchard,
-        legacy_allows_new_value,
+        legacy_allows_external_payment,
         keys,
         &orchard_ivks,
         &orchard_ovks,
@@ -423,11 +434,17 @@ pub fn pczt_verify(
             &mut verdict,
         )?;
 
-        // Publicly revealed value leaving legacy Orchard (pool crossing). The
-        // committed value balance is a signed consensus field, so this amount is
-        // bound to the signed bytes, not to any phone-supplied description.
+        // NU6.3 Orchard turnstile + pool-crossing display (CR-1499 / CR-1507).
+        // The committed Orchard value balance is a signed consensus field.
+        // Positive ⇒ value leaving legacy Orchard (display as pool crossing).
+        // Negative ⇒ value *entering* legacy Orchard — forbidden after Ironwood
+        // activation (turnstile). Wallet-owned change that returns while
+        // spending Orchard notes keeps net ≥ 0 and is allowed.
         let committed_orchard_net = signed_orchard_value_sum(*pczt.orchard().value_sum())?;
-        if committed_orchard_net > 0 {
+        if committed_orchard_net < 0 {
+            verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
+            verdict.all_outputs_accounted = false;
+        } else if committed_orchard_net > 0 {
             verdict.legacy_orchard_net_outflow_zatoshis =
                 u64::try_from(committed_orchard_net).map_err(|_| PcztSignError::SummaryOverflow)?;
         }
@@ -479,9 +496,12 @@ struct OrchardPoolScanState<'a> {
 /// conservation between authenticated spend values and the committed net value.
 ///
 /// `allow_new_value` is false for the legacy Orchard bundle in the Ironwood era
-/// (post-NU6.3 no new value may enter legacy Orchard): any positive-value
-/// output there — recipient-matching or wallet-owned included — is refused as
-/// foreign rather than silently accounted.
+/// (post-NU6.3). That flag only blocks **external payments** to Orchard-protocol
+/// receivers in the legacy bundle (those must land in Ironwood). Wallet-owned
+/// change may still return to legacy Orchard when the transaction also spends
+/// Orchard notes and the pool's net value strictly decreases — that is the
+/// NU6.3 turnstile, not a ban on all Orchard outputs (CR-1507). Net Orchard
+/// *inflow* is refused separately after this scan.
 #[allow(clippy::too_many_arguments)]
 fn scan_orchard_protocol_pool<V: DomainVersion>(
     pczt: &pczt::Pczt,
@@ -525,8 +545,8 @@ fn scan_orchard_protocol_pool<V: DomainVersion>(
             if !allow_new_value {
                 // Post-NU6.3, a payment to an Orchard-protocol receiver lands
                 // in Ironwood. A recipient-paying output in the legacy Orchard
-                // bundle is consensus-invalid new value — refuse it instead of
-                // counting it toward the approved amount.
+                // bundle is the wrong pool for an external payment — refuse it
+                // instead of counting it toward the approved amount.
                 verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
                 verdict.all_outputs_accounted = false;
                 continue;
@@ -563,16 +583,13 @@ fn scan_orchard_protocol_pool<V: DomainVersion>(
         // trusted by itself: when spends are present, the authenticated-spend
         // conservation check below binds those values back to the committed
         // net value.
+        //
+        // CR-1507: post-NU6.3 wallet-owned change MAY sit in legacy Orchard
+        // when Orchard notes are spent and net pool value decreases. Do not
+        // auto-refuse positive-value Orchard outputs; classify ownership and
+        // let the turnstile (committed net ≥ 0) refuse true pool growth.
         let has_positive_value = output_value.map(|v| v > 0).unwrap_or(true);
         if has_positive_value {
-            if !allow_new_value {
-                // No new value may enter this pool post-NU6.3: even a
-                // wallet-owned output here could never be created by consensus
-                // — refuse rather than account it.
-                verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
-                verdict.all_outputs_accounted = false;
-                continue;
-            }
             let owned = match parsed_addr.as_ref() {
                 Some(addr) if keys.orchard_owns(addr) => true,
                 // Redacted recipient field: fall back to trial decryption.

@@ -331,6 +331,89 @@ fn diverted_change_output_is_refused() {
     assert!(!verdict.all_outputs_accounted);
 }
 
+/// CR-1507: Unshield to the wallet's own transparent receiver.
+///
+/// All transparent outputs are either the approved recipient or wallet-owned
+/// change. Totality must hold so Hold to Approve can appear.
+#[test]
+fn unshield_to_wallet_transparent_receiver_is_fully_accounted() {
+    let (keys, owned) = wallet_keys();
+    // Unshield destination is the wallet's own transparent address (QA shape).
+    let recipient = t_address(owned);
+    let pczt = build_v6_pczt(&owned, &owned, |_| {});
+    let bytes = wire(pczt);
+
+    let summary = pczt_summary(&bytes, &recipient, NetworkType::Main).expect("summary");
+    // Both the payment and the change pay the same owned t-address, so both
+    // match the approved recipient (unshield-to-self).
+    assert!(summary.matched_outputs >= 1);
+    assert_eq!(summary.recipient_amount_zatoshis, APPROVED_AMOUNT + CHANGE_VALUE);
+
+    // Approve the total paid to the transparent receiver (payment + change both
+    // land there in this transparent-only fixture).
+    let approved = ApprovedTx {
+        recipient_address: &recipient,
+        expected_amount_zatoshis: APPROVED_AMOUNT + CHANGE_VALUE,
+        expected_memo: "",
+        network: NetworkType::Main,
+    };
+    let verdict = pczt_verify(&bytes, &approved, &keys).expect("verdict");
+    assert_eq!(verdict.foreign_output_count, 0);
+    assert!(
+        verdict.all_outputs_accounted,
+        "wallet-owned transparent unshield outputs must not classify as foreign"
+    );
+    assert!(verdict.recipient_output_count >= 1);
+}
+
+/// CR-1507: post-NU6.3 Orchard turnstile — value must not *enter* legacy Orchard.
+/// A committed negative Orchard value balance is refuse-closed even with no actions.
+#[test]
+fn nu63_orchard_inflow_is_refused_by_turnstile() {
+    let (keys, owned) = wallet_keys();
+    let recipient_hash = FOREIGN_HASH;
+    let recipient = t_address(recipient_hash);
+
+    let pczt = build_v6_pczt(&recipient_hash, &owned, |value| {
+        // Inject a non-empty Orchard value_sum claiming net *inflow* into legacy
+        // Orchard (magnitude, is_negative=true). Empty actions skip conservation;
+        // the turnstile still sees the committed balance.
+        value["orchard"] = json!({
+            "actions": [],
+            "flags": 0b0000_0111,
+            "value_sum": (5_000u64, true),
+            "anchor": null,
+            "note_version": "V2",
+            "zkproof": null,
+            "bsk": null,
+        });
+    });
+    let bytes = wire(pczt);
+
+    let verdict = pczt_verify(&bytes, &approved_tx(&recipient), &keys).expect("verdict");
+    assert!(
+        !verdict.all_outputs_accounted || verdict.foreign_output_count > 0,
+        "Orchard net inflow post-NU6.3 must fail closed"
+    );
+}
+
+/// CR-1507 negative: a foreign transparent output still removes approval.
+#[test]
+fn foreign_output_still_fails_closed_on_v6() {
+    let (keys, owned) = wallet_keys();
+    let recipient_hash = [0x11u8; 20];
+    let recipient = t_address(recipient_hash);
+
+    let pczt = build_v6_pczt(&recipient_hash, &owned, |value| {
+        value["transparent"]["outputs"][1]["script_pubkey"] = json!(p2pkh_script(&FOREIGN_HASH));
+    });
+    let bytes = wire(pczt);
+
+    let verdict = pczt_verify(&bytes, &approved_tx(&recipient), &keys).expect("verdict");
+    assert_eq!(verdict.foreign_output_count, 1);
+    assert!(!verdict.all_outputs_accounted);
+}
+
 #[test]
 fn mutated_fee_is_visible_to_the_watch() {
     let (keys, owned) = wallet_keys();
