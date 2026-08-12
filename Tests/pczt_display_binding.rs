@@ -31,13 +31,24 @@
 
 #![cfg(feature = "pczt-signer")]
 
+use ff::PrimeField;
 use pczt::roles::creator::Creator;
 use pczt::Pczt;
+use rand_core::{OsRng, RngCore};
 use serde_json::{json, Value};
+use upstream_orchard::{
+    builder::{Builder as OrchardBuilder, BundleType},
+    bundle::{BundleVersion, TxVersion},
+    keys::{FullViewingKey as OrchardFullViewingKey, Scope},
+    note::{Note as OrchardNote, RandomSeed, Rho},
+    value::{NoteValue, Sign},
+};
 use zcash_address::{ToAddress, ZcashAddress};
 use zcash_protocol::consensus::{BranchId, NetworkType};
 use zcash_signer::pczt_signer::{pczt_summary, sign_pczt, PcztSignError, PcztSigningKeys};
-use zcash_signer::pczt_verify::{derive_wallet_viewing_keys, pczt_verify, ApprovedTx, WalletViewingKeys};
+use zcash_signer::pczt_verify::{
+    derive_wallet_viewing_keys, pczt_verify, ApprovedTx, WalletViewingKeys,
+};
 
 /// Mainnet ZEC coin type (SLIP-44).
 const COIN_TYPE: u32 = 133;
@@ -156,6 +167,140 @@ fn wallet_keys() -> (WalletViewingKeys, [u8; 20]) {
         .first()
         .expect("transparent ownership window is non-empty");
     (keys, owned)
+}
+
+/// Create a real wallet-owned legacy-Orchard note for a post-NU6.3 PCZT.
+/// The verifier authenticates its value by recomputing the nullifier from the
+/// same FVK, so a serde-only placeholder cannot stand in for this fixture.
+fn legacy_orchard_note(
+    fvk: &OrchardFullViewingKey,
+    value: u64,
+    bundle_version: BundleVersion,
+    rng: &mut impl RngCore,
+) -> OrchardNote {
+    let rho = loop {
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        if let Some(rho) = Option::<Rho>::from(Rho::from_bytes(&bytes)) {
+            break rho;
+        }
+    };
+    let rseed = loop {
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        if let Some(rseed) = Option::<RandomSeed>::from(RandomSeed::from_bytes(bytes, &rho)) {
+            break rseed;
+        }
+    };
+    Option::<OrchardNote>::from(OrchardNote::from_parts(
+        fvk.address_at(0u32, Scope::External),
+        NoteValue::from_raw(value),
+        rho,
+        rseed,
+        bundle_version.note_version(),
+    ))
+    .expect("test note is internally valid")
+}
+
+/// Convert a bundle built by the authoritative Orchard constructor into the
+/// public PCZT v2 serde shape used by these display-binding fixtures.
+fn legacy_orchard_bundle_json(bundle: &upstream_orchard::pczt::Bundle) -> Value {
+    let actions = bundle
+        .actions()
+        .iter()
+        .map(|action| {
+            let spend = action.spend();
+            let output = action.output();
+            let spend_auth_sig = spend.spend_auth_sig().as_ref().map(|signature| {
+                let bytes: [u8; 64] = signature.into();
+                bytes.to_vec()
+            });
+            let rk: [u8; 32] = spend.rk().into();
+
+            json!({
+                "cv_net": action.cv_net().to_bytes(),
+                "spend": {
+                    "nullifier": spend.nullifier().to_bytes(),
+                    "rk": rk,
+                    "spend_auth_sig": spend_auth_sig,
+                    "recipient": spend.recipient().as_ref().map(|a| a.to_raw_address_bytes().to_vec()),
+                    "value": spend.value().as_ref().map(|v| v.inner()),
+                    "rho": spend.rho().as_ref().map(|rho| rho.to_bytes()),
+                    "rseed": spend.rseed().as_ref().map(|rseed| *rseed.as_bytes()),
+                    "fvk": spend.fvk().as_ref().map(|fvk| fvk.to_bytes().to_vec()),
+                    "witness": null,
+                    "alpha": spend.alpha().as_ref().map(|alpha| alpha.to_repr()),
+                    "zip32_derivation": null,
+                    "dummy_sk": spend.dummy_sk().as_ref().map(|sk| *sk.to_bytes()),
+                    "proprietary": spend.proprietary().clone(),
+                },
+                "output": {
+                    "cmx": output.cmx().to_bytes(),
+                    "ephemeral_key": output.encrypted_note().epk_bytes,
+                    "enc_ciphertext": {"Encrypted": output.encrypted_note().enc_ciphertext.to_vec()},
+                    "out_ciphertext": output.encrypted_note().out_ciphertext.to_vec(),
+                    "recipient": output.recipient().as_ref().map(|a| a.to_raw_address_bytes().to_vec()),
+                    "value": output.value().as_ref().map(|v| v.inner()),
+                    "rseed": output.rseed().as_ref().map(|rseed| *rseed.as_bytes()),
+                    "ock": null,
+                    "zip32_derivation": null,
+                    "user_address": null,
+                    "proprietary": output.proprietary().clone(),
+                },
+                "rcv": action.rcv().as_ref().map(|rcv| rcv.to_bytes()),
+            })
+        })
+        .collect::<Vec<_>>();
+    let (magnitude, sign) = bundle.value_sum().magnitude_sign();
+    let bsk: Option<[u8; 32]> = bundle.bsk().as_ref().map(Into::into);
+
+    json!({
+        "actions": actions,
+        "flags": bundle.flag_byte(),
+        "value_sum": (magnitude, matches!(sign, Sign::Negative)),
+        "anchor": null,
+        "note_version": "V2",
+        "zkproof": null,
+        "bsk": bsk,
+    })
+}
+
+/// Build the CR-1507 production shape: a real Legacy Orchard spend, a
+/// wallet-owned Legacy Orchard change output, and value leaving the pool for a
+/// transparent receiver. `change_fvk` lets the negative fixture divert change.
+fn legacy_orchard_unshield_bundle_json(
+    spend_fvk: &OrchardFullViewingKey,
+    change_fvk: &OrchardFullViewingKey,
+) -> Value {
+    let mut rng = OsRng;
+    let bundle_version = BundleVersion::orchard_v3();
+    let note = legacy_orchard_note(spend_fvk, INPUT_VALUE, bundle_version, &mut rng);
+    let mut builder = OrchardBuilder::new_with_anchor_deferred(
+        BundleType::DEFAULT,
+        bundle_version,
+        bundle_version.default_flags(),
+        TxVersion::V6,
+    )
+    .expect("post-NU6.3 Orchard supports deferred anchors");
+    builder
+        .add_spend_unwitnessed(spend_fvk.clone(), note)
+        .expect("wallet note is spendable");
+    builder
+        .add_change_output(
+            change_fvk.clone(),
+            Some(change_fvk.to_ovk(Scope::Internal)),
+            change_fvk.address_at(0u32, Scope::Internal),
+            NoteValue::from_raw(CHANGE_VALUE),
+            [0u8; 512],
+        )
+        .expect("wallet-owned legacy Orchard change is constructible");
+    let (mut bundle, _) = builder
+        .build_for_pczt(&mut rng)
+        .expect("legacy Orchard PCZT bundle builds");
+    bundle
+        .finalize_io([0u8; 32], &mut rng)
+        .expect("dummy actions finalize");
+    legacy_orchard_bundle_json(&bundle)
 }
 
 /// The PCZT the phone *claims* matches the approval: pay `APPROVED_AMOUNT` to
@@ -331,39 +476,68 @@ fn diverted_change_output_is_refused() {
     assert!(!verdict.all_outputs_accounted);
 }
 
-/// CR-1507: Unshield to the wallet's own transparent receiver.
+/// CR-1507: Legacy Orchard spend to the wallet's transparent receiver, with
+/// wallet-owned change retained in the Legacy Orchard bundle.
 ///
-/// All transparent outputs are either the approved recipient or wallet-owned
-/// change. Totality must hold so Hold to Approve can appear.
+/// This is the production shape that the old verifier rejected. The real
+/// Orchard action is load-bearing: restoring the pre-fix blanket rejection of
+/// positive Legacy Orchard outputs must fail this test.
 #[test]
-fn unshield_to_wallet_transparent_receiver_is_fully_accounted() {
+fn legacy_orchard_unshield_to_wallet_transparent_receiver_is_fully_accounted() {
     let (keys, owned) = wallet_keys();
-    // Unshield destination is the wallet's own transparent address (QA shape).
     let recipient = t_address(owned);
-    let pczt = build_v6_pczt(&owned, &owned, |_| {});
-    let bytes = wire(pczt);
+    let spend_fvk = keys.orchard_fvk.as_ref().expect("wallet has Orchard FVK");
+    let mut value = empty_v6_pczt_json();
+    value["transparent"] = json!({
+        "inputs": [],
+        "outputs": [transparent_output_json(APPROVED_AMOUNT, &owned, None)],
+    });
+    value["orchard"] = legacy_orchard_unshield_bundle_json(spend_fvk, spend_fvk);
+    let bytes = wire(pczt_from_v6_json(value));
 
     let summary = pczt_summary(&bytes, &recipient, NetworkType::Main).expect("summary");
-    // Both the payment and the change pay the same owned t-address, so both
-    // match the approved recipient (unshield-to-self).
-    assert!(summary.matched_outputs >= 1);
-    assert_eq!(summary.recipient_amount_zatoshis, APPROVED_AMOUNT + CHANGE_VALUE);
+    assert_eq!(summary.matched_outputs, 1);
+    assert_eq!(summary.recipient_amount_zatoshis, APPROVED_AMOUNT);
+    assert_eq!(summary.fee_zatoshis, APPROVED_FEE);
 
-    // Approve the total paid to the transparent receiver (payment + change both
-    // land there in this transparent-only fixture).
-    let approved = ApprovedTx {
-        recipient_address: &recipient,
-        expected_amount_zatoshis: APPROVED_AMOUNT + CHANGE_VALUE,
-        expected_memo: "",
-        network: NetworkType::Main,
-    };
-    let verdict = pczt_verify(&bytes, &approved, &keys).expect("verdict");
+    let verdict = pczt_verify(&bytes, &approved_tx(&recipient), &keys).expect("verdict");
     assert_eq!(verdict.foreign_output_count, 0);
     assert!(
         verdict.all_outputs_accounted,
-        "wallet-owned transparent unshield outputs must not classify as foreign"
+        "wallet-owned Legacy Orchard change must not classify as foreign"
     );
-    assert!(verdict.recipient_output_count >= 1);
+    assert_eq!(verdict.recipient_output_count, 1);
+    assert_eq!(verdict.wallet_owned_output_amount_zatoshis, CHANGE_VALUE);
+    assert_eq!(
+        verdict.legacy_orchard_net_outflow_zatoshis,
+        APPROVED_AMOUNT + APPROVED_FEE
+    );
+    assert!(verdict.orchard_action_count > 0);
+}
+
+/// The matching negative fixture: a valid Legacy Orchard spend whose retained
+/// output belongs to another wallet must still remove approval controls.
+#[test]
+fn legacy_orchard_unshield_with_foreign_change_is_refused() {
+    let (keys, owned) = wallet_keys();
+    let recipient = t_address(owned);
+    let spend_fvk = keys.orchard_fvk.as_ref().expect("wallet has Orchard FVK");
+    let foreign_keys = derive_wallet_viewing_keys(&[8u8; 32], COIN_TYPE, 0);
+    let foreign_fvk = foreign_keys
+        .orchard_fvk
+        .as_ref()
+        .expect("foreign wallet has Orchard FVK");
+    let mut value = empty_v6_pczt_json();
+    value["transparent"] = json!({
+        "inputs": [],
+        "outputs": [transparent_output_json(APPROVED_AMOUNT, &owned, None)],
+    });
+    value["orchard"] = legacy_orchard_unshield_bundle_json(spend_fvk, foreign_fvk);
+    let bytes = wire(pczt_from_v6_json(value));
+
+    let verdict = pczt_verify(&bytes, &approved_tx(&recipient), &keys).expect("verdict");
+    assert!(verdict.foreign_output_count > 0);
+    assert!(!verdict.all_outputs_accounted);
 }
 
 /// CR-1507: post-NU6.3 Orchard turnstile — value must not *enter* legacy Orchard.

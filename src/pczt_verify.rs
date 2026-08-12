@@ -495,7 +495,7 @@ struct OrchardPoolScanState<'a> {
 /// wallet-owned / foreign, recover + bind the recipient memo, and enforce value
 /// conservation between authenticated spend values and the committed net value.
 ///
-/// `allow_new_value` is false for the legacy Orchard bundle in the Ironwood era
+/// `allow_external_payment` is false for the legacy Orchard bundle in the Ironwood era
 /// (post-NU6.3). That flag only blocks **external payments** to Orchard-protocol
 /// receivers in the legacy bundle (those must land in Ironwood). Wallet-owned
 /// change may still return to legacy Orchard when the transaction also spends
@@ -506,7 +506,7 @@ struct OrchardPoolScanState<'a> {
 fn scan_orchard_protocol_pool<V: DomainVersion>(
     pczt: &pczt::Pczt,
     pool: OrchardProtocolPool,
-    allow_new_value: bool,
+    allow_external_payment: bool,
     keys: &WalletViewingKeys,
     ivks: &[PreparedIncomingViewingKey],
     ovks: &[OrchardOvk],
@@ -542,7 +542,7 @@ fn scan_orchard_protocol_pool<V: DomainVersion>(
         );
 
         if matches_recipient {
-            if !allow_new_value {
+            if !allow_external_payment {
                 // Post-NU6.3, a payment to an Orchard-protocol receiver lands
                 // in Ironwood. A recipient-paying output in the legacy Orchard
                 // bundle is the wrong pool for an external payment — refuse it
