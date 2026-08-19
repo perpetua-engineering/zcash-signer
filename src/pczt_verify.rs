@@ -36,13 +36,13 @@
 
 use alloc::vec::Vec;
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use upstream_orchard::{
     keys::{
         FullViewingKey as OrchardFullViewingKey, IncomingViewingKey as OrchardIvk,
         OutgoingViewingKey as OrchardOvk, PreparedIncomingViewingKey, Scope,
     },
-    note::{ExtractedNoteCommitment, Note as OrchardNote, Nullifier},
+    note::{ExtractedNoteCommitment, Nullifier},
     note_encryption::{
         CompactAction, DomainVersion, IronwoodVersion, NoteEncryptionDomain, OrchardVersion,
     },
@@ -58,7 +58,10 @@ use sapling_crypto::{
     zip32::DiversifiableFullViewingKey as SaplingDfvk, PaymentAddress as SaplingAddress,
 };
 
-use zcash_protocol::consensus::{BranchId, NetworkType};
+use zcash_protocol::{
+    consensus::{BranchId, NetworkType},
+    memo::{Memo, MemoBytes},
+};
 
 use crate::pczt_signer::{PcztSignError, RecipientReceivers};
 
@@ -350,6 +353,15 @@ pub fn pczt_verify(
     }
 
     // ── Sapling outputs ────────────────────────────────────────────────────
+    // Authenticate the optional PCZT metadata against each output's signed
+    // note commitment before allowing a claimed zero value to skip ownership
+    // classification. Missing or rewritten recipient/value/rseed metadata
+    // fails closed; genuine zero-valued padding outputs still reconstruct their
+    // commitments and remain harmless.
+    if !sapling_output_metadata_is_authenticated(&pczt) {
+        verdict.foreign_output_count = verdict.foreign_output_count.saturating_add(1);
+        verdict.all_outputs_accounted = false;
+    }
     for output in pczt.sapling().outputs() {
         let is_recipient = match (output.recipient(), output.value()) {
             (Some(raw), Some(value)) if recipient.sapling.as_ref() == Some(raw) => {
@@ -461,6 +473,22 @@ pub fn pczt_verify(
     Ok(verdict)
 }
 
+/// True iff every Sapling output's optional note metadata reconstructs the
+/// output commitment carried by the signed transaction.
+fn sapling_output_metadata_is_authenticated(pczt: &pczt::Pczt) -> bool {
+    let mut authenticated = true;
+    let result = pczt::roles::verifier::Verifier::new(pczt.clone()).with_sapling(|bundle| {
+        for output in bundle.outputs() {
+            if output.verify_note_commitment().is_err() {
+                authenticated = false;
+            }
+        }
+        Ok::<(), pczt::roles::verifier::SaplingError<()>>(())
+    });
+
+    result.is_ok() && authenticated
+}
+
 // -----------------------------------------------------------------------------
 // Orchard-protocol pool scanning (legacy Orchard + Ironwood)
 // -----------------------------------------------------------------------------
@@ -479,6 +507,38 @@ impl OrchardProtocolPool {
             Self::Ironwood => pczt.ironwood(),
         }
     }
+}
+
+fn orchard_output_metadata_is_authenticated(pczt: &pczt::Pczt, pool: OrchardProtocolPool) -> bool {
+    let mut authenticated = true;
+    let verifier = pczt::roles::verifier::Verifier::new(pczt.clone());
+    let closure = |bundle: &upstream_orchard::pczt::Bundle| {
+        for action in bundle.actions() {
+            if action
+                .output()
+                .verify_note_commitment(action.spend())
+                .is_err()
+            {
+                authenticated = false;
+            }
+        }
+        Ok::<(), pczt::roles::verifier::OrchardError<()>>(())
+    };
+    let result = match pool {
+        OrchardProtocolPool::Orchard => verifier.with_orchard(closure).map(|_| ()),
+        OrchardProtocolPool::Ironwood => verifier.with_ironwood(closure).map(|_| ()),
+    };
+
+    result.is_ok() && authenticated
+}
+
+/// Signing-boundary guard for attacker-controlled shielded output metadata.
+/// Optional PCZT recipient/value/randomness fields must reconstruct the note
+/// commitments carried by the transaction before any spend signature is made.
+pub(crate) fn shielded_output_metadata_is_authenticated(pczt: &pczt::Pczt) -> bool {
+    sapling_output_metadata_is_authenticated(pczt)
+        && orchard_output_metadata_is_authenticated(pczt, OrchardProtocolPool::Orchard)
+        && orchard_output_metadata_is_authenticated(pczt, OrchardProtocolPool::Ironwood)
 }
 
 /// Accumulators shared by the per-pool output scans.
@@ -566,8 +626,9 @@ fn scan_orchard_protocol_pool<V: DomainVersion>(
             match recover_orchard_memo::<V>(action, ovks) {
                 Some(memo) => {
                     verdict.memo_checked = true;
-                    if canonical_memo(&memo) != scan.approved_memo {
-                        verdict.memo_matches = false;
+                    match canonical_memo(&memo) {
+                        Some(memo) if memo == scan.approved_memo => {}
+                        _ => verdict.memo_matches = false,
                     }
                 }
                 None => {
@@ -687,6 +748,18 @@ fn authenticated_orchard_spend_total(
     let verifier = pczt::roles::verifier::Verifier::new(pczt.clone());
     let closure = |bundle: &upstream_orchard::pczt::Bundle| {
         for action in bundle.actions() {
+            // Authenticate every output value, including zero. A compromised
+            // phone can rewrite the optional PCZT metadata but cannot rewrite
+            // the note commitment without changing the signed transaction.
+            // This also accepts genuine zero-valued padding outputs because
+            // their metadata reconstructs the committed note exactly.
+            if action
+                .output()
+                .verify_note_commitment(action.spend())
+                .is_err()
+            {
+                failed = true;
+            }
             match authenticated_orchard_spend_value(action, keys) {
                 Ok(value) => {
                     total = total
@@ -715,11 +788,12 @@ fn authenticated_orchard_spend_total(
 /// Returns the authenticated Orchard-protocol spend value for this action.
 ///
 /// The value is trusted only after reconstructing the spent note from the PCZT
-/// spend fields and recomputing its nullifier with our FVK. This binds the
-/// phone-provided spend value to a consensus field that the transaction reveals,
-/// closing the net-neutral "real output described as value 0" attack. The
-/// spent note's plaintext version comes from the parsed spend itself (legacy
-/// Orchard V2 vs Ironwood V3 note commitments differ).
+/// spend fields and recomputing its nullifier. This binds the phone-provided
+/// spend value to a consensus field that the transaction reveals, including
+/// when the phone claims the value is zero. The upstream verifier handles real
+/// wallet notes with our expected FVK and genuine zero-valued dummy notes with
+/// their PCZT-carried dummy FVK. The spent note's plaintext version comes from
+/// the parsed spend itself (legacy Orchard V2 vs Ironwood V3 commitments differ).
 fn authenticated_orchard_spend_value(
     action: &upstream_orchard::pczt::Action,
     keys: &WalletViewingKeys,
@@ -728,35 +802,11 @@ fn authenticated_orchard_spend_value(
     let Some(value) = *spend.value() else {
         return Err(());
     };
-    if value.inner() == 0 {
-        return Ok(0);
-    }
 
     let Some(fvk) = keys.orchard_fvk.as_ref() else {
         return Err(());
     };
-    let Some(recipient) = *spend.recipient() else {
-        return Err(());
-    };
-    let Some(rho) = *spend.rho() else {
-        return Err(());
-    };
-    let Some(rseed) = *spend.rseed() else {
-        return Err(());
-    };
-    let Some(note) = Option::<OrchardNote>::from(OrchardNote::from_parts(
-        recipient,
-        value,
-        rho,
-        rseed,
-        *spend.note_version(),
-    )) else {
-        return Err(());
-    };
-
-    if note.nullifier(fvk).to_bytes() != spend.nullifier().to_bytes() {
-        return Err(());
-    }
+    spend.verify_nullifier(Some(fvk)).map_err(|_| ())?;
     Ok(value.inner())
 }
 
@@ -817,25 +867,16 @@ impl WalletViewingKeys {
 // Memo canonicalization
 // -----------------------------------------------------------------------------
 
-/// Reduce a raw 512-byte Zcash memo field to its canonical text form so it can
-/// be compared to the user-approved memo string. Empty / no-memo (0xF6 lead, or
-/// all-zero) ⇒ "". Text memos (lead byte ≤ 0xF4) ⇒ UTF-8 with trailing NULs
-/// stripped. Anything else (non-UTF-8, reserved leads) ⇒ "" (treated as
-/// no displayable memo; a non-empty approved memo then fails to match).
-fn canonical_memo(memo: &[u8; 512]) -> String {
-    match memo[0] {
-        0xF6 => String::new(),
-        lead if lead <= 0xF4 => {
-            let end = memo
-                .iter()
-                .rposition(|&b| b != 0)
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            core::str::from_utf8(&memo[..end])
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-        }
-        _ => String::new(),
+/// Reduce a raw 512-byte Zcash memo field to the exact text the watch can bind
+/// to the approval. Canonical no-memo and valid ZIP-302 text are accepted;
+/// arbitrary, future/reserved, non-canonical, and malformed UTF-8 encodings are
+/// not representable by the current approval UI and therefore fail closed.
+fn canonical_memo(memo: &[u8; 512]) -> Option<String> {
+    let memo = MemoBytes::from_bytes(memo).ok()?;
+    match Memo::try_from(memo).ok()? {
+        Memo::Empty => Some(String::new()),
+        Memo::Text(text) => Some(String::from(text)),
+        Memo::Future(_) | Memo::Arbitrary(_) => None,
     }
 }
 
@@ -1100,8 +1141,9 @@ mod tests {
     fn canonical_memo_no_memo_is_empty() {
         let mut m = [0u8; 512];
         m[0] = 0xF6; // canonical "no memo"
-        assert_eq!(canonical_memo(&m), "");
-        assert_eq!(canonical_memo(&[0u8; 512]), ""); // all-zero lead ≤ 0xF4, no text
+        assert_eq!(canonical_memo(&m), Some(String::new()));
+        // All-zero lead ≤ 0xF4 is the empty text memo.
+        assert_eq!(canonical_memo(&[0u8; 512]), Some(String::new()));
     }
 
     #[test]
@@ -1109,14 +1151,28 @@ mod tests {
         let text = "gm ☕";
         let mut m = [0u8; 512];
         m[..text.len()].copy_from_slice(text.as_bytes());
-        assert_eq!(canonical_memo(&m), text);
+        assert_eq!(canonical_memo(&m), Some(text.to_string()));
     }
 
     #[test]
-    fn canonical_memo_reserved_lead_is_empty() {
+    fn canonical_memo_non_text_encodings_are_refused() {
         let mut m = [0u8; 512];
-        m[0] = 0xF5; // reserved (> 0xF4, != 0xF6)
-        assert_eq!(canonical_memo(&m), "");
+        for lead in [0xF5, 0xF7, 0xFF] {
+            m.fill(0);
+            m[0] = lead;
+            assert_eq!(canonical_memo(&m), None);
+        }
+
+        // 0xF6 means no memo only when every trailing byte is zero.
+        m.fill(0);
+        m[0] = 0xF6;
+        m[1] = 1;
+        assert_eq!(canonical_memo(&m), None);
+
+        // A text-tagged memo must actually be valid UTF-8.
+        m.fill(0);
+        m[..2].copy_from_slice(&[0xC3, 0x28]);
+        assert_eq!(canonical_memo(&m), None);
     }
 
     #[test]

@@ -307,6 +307,12 @@ upstream `orchard`, `sapling-crypto`, and `zcash_transparent` crates:
 - All operations use constant-time implementations where available
 - `secure-signer` feature wraps seed and keys in `Zeroizing<T>` (zeroed on drop)
 - `zsig_pczt_sign_secure` accepts SE-encrypted mnemonic — seed decrypted in C++, used in Rust, never exposed to Swift
+- PCZT shielded output metadata is authenticated against the signed Sapling, Orchard, or Ironwood
+  note commitment before signing. Orchard-protocol spend metadata is also nullifier-verified even
+  when its claimed value is zero, so optional phone metadata cannot hide a net-neutral drain.
+- Orchard/Ironwood recipient memos fail closed unless they decode as canonical ZIP-302 empty or
+  valid UTF-8 text exactly matching the approved memo; opaque or future memo formats are not
+  silently represented as empty.
 
 ## Cargo Features
 

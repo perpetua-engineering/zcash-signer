@@ -35,15 +35,26 @@ use ff::PrimeField;
 use pczt::roles::creator::Creator;
 use pczt::Pczt;
 use rand_core::{OsRng, RngCore};
+use sapling_crypto::{
+    builder::{Builder as SaplingBuilder, BundleType as SaplingBundleType},
+    note_encryption::Zip212Enforcement,
+    value::NoteValue as SaplingNoteValue,
+    Anchor as SaplingAnchor, CommitmentTree as SaplingCommitmentTree,
+    IncrementalWitness as SaplingIncrementalWitness, Node as SaplingNode, Note as SaplingNote,
+    Rseed as SaplingRseed,
+};
 use serde_json::{json, Value};
 use upstream_orchard::{
     builder::{Builder as OrchardBuilder, BundleType},
     bundle::{BundleVersion, TxVersion},
     keys::{FullViewingKey as OrchardFullViewingKey, Scope},
-    note::{Note as OrchardNote, RandomSeed, Rho},
+    note::{Note as OrchardNote, NoteVersion, RandomSeed, Rho},
     value::{NoteValue, Sign},
 };
-use zcash_address::{ToAddress, ZcashAddress};
+use zcash_address::{
+    unified::{Address as UnifiedAddress, Encoding, Receiver},
+    ToAddress, ZcashAddress,
+};
 use zcash_protocol::consensus::{BranchId, NetworkType};
 use zcash_signer::pczt_signer::{pczt_summary, sign_pczt, PcztSignError, PcztSigningKeys};
 use zcash_signer::pczt_verify::{
@@ -204,7 +215,7 @@ fn legacy_orchard_note(
 
 /// Convert a bundle built by the authoritative Orchard constructor into the
 /// public PCZT v2 serde shape used by these display-binding fixtures.
-fn legacy_orchard_bundle_json(bundle: &upstream_orchard::pczt::Bundle) -> Value {
+fn orchard_protocol_bundle_json(bundle: &upstream_orchard::pczt::Bundle) -> Value {
     let actions = bundle
         .actions()
         .iter()
@@ -254,12 +265,17 @@ fn legacy_orchard_bundle_json(bundle: &upstream_orchard::pczt::Bundle) -> Value 
     let (magnitude, sign) = bundle.value_sum().magnitude_sign();
     let bsk: Option<[u8; 32]> = bundle.bsk().as_ref().map(Into::into);
 
+    let note_version = match bundle.bundle_version().note_version() {
+        NoteVersion::V2 => "V2",
+        NoteVersion::V3 => "V3",
+    };
+
     json!({
         "actions": actions,
         "flags": bundle.flag_byte(),
         "value_sum": (magnitude, matches!(sign, Sign::Negative)),
         "anchor": null,
-        "note_version": "V2",
+        "note_version": note_version,
         "zkproof": null,
         "bsk": bsk,
     })
@@ -300,7 +316,177 @@ fn legacy_orchard_unshield_bundle_json(
     bundle
         .finalize_io([0u8; 32], &mut rng)
         .expect("dummy actions finalize");
-    legacy_orchard_bundle_json(&bundle)
+    orchard_protocol_bundle_json(&bundle)
+}
+
+/// Build a net-neutral legacy-Orchard bundle that spends a real wallet note
+/// and sends the entire value to a foreign wallet. This is economically hidden
+/// from the transparent cover payment because the committed pool balance is 0.
+fn orchard_protocol_net_neutral_drain_bundle_json(
+    spend_fvk: &OrchardFullViewingKey,
+    foreign_fvk: &OrchardFullViewingKey,
+    value: u64,
+    bundle_version: BundleVersion,
+    memo: [u8; 512],
+) -> Value {
+    let mut rng = OsRng;
+    let note = legacy_orchard_note(spend_fvk, value, bundle_version, &mut rng);
+    let mut builder = OrchardBuilder::new_with_anchor_deferred(
+        BundleType::DEFAULT,
+        bundle_version,
+        bundle_version.default_flags(),
+        TxVersion::V6,
+    )
+    .expect("post-NU6.3 Orchard supports deferred anchors");
+    builder
+        .add_spend_unwitnessed(spend_fvk.clone(), note)
+        .expect("wallet note is spendable");
+    builder
+        .add_change_output(
+            foreign_fvk.clone(),
+            Some(spend_fvk.to_ovk(Scope::External)),
+            foreign_fvk.address_at(0u32, Scope::External),
+            NoteValue::from_raw(value),
+            memo,
+        )
+        .expect("foreign drain output is constructible");
+    let (mut bundle, _) = builder
+        .build_for_pczt(&mut rng)
+        .expect("legacy Orchard PCZT bundle builds");
+    bundle
+        .finalize_io([0u8; 32], &mut rng)
+        .expect("dummy actions finalize");
+    orchard_protocol_bundle_json(&bundle)
+}
+
+/// Convert an authoritative Sapling PCZT bundle into the public PCZT serde
+/// shape used by the mutation fixtures below.
+fn sapling_bundle_json(bundle: &sapling_crypto::pczt::Bundle) -> Value {
+    let spends = bundle
+        .spends()
+        .iter()
+        .map(|spend| {
+            let (rcm, rseed) = match spend.rseed() {
+                Some(SaplingRseed::BeforeZip212(rcm)) => (Some(rcm.to_bytes()), None),
+                Some(SaplingRseed::AfterZip212(rseed)) => (None, Some(*rseed)),
+                None => (None, None),
+            };
+            let rk: [u8; 32] = (*spend.rk()).into();
+            let spend_auth_sig = spend.spend_auth_sig().map(|signature| {
+                let bytes: [u8; 64] = signature.into();
+                bytes.to_vec()
+            });
+            let proof_generation_key = spend
+                .proof_generation_key()
+                .as_ref()
+                .map(|key| json!([key.ak.to_bytes(), key.nsk.to_bytes()]));
+            let witness = spend.witness().as_ref().map(|witness| {
+                json!([
+                    u32::try_from(u64::from(witness.position()))
+                        .expect("Sapling positions fit in u32"),
+                    witness
+                        .path_elems()
+                        .iter()
+                        .map(|node| node.to_bytes())
+                        .collect::<Vec<_>>()
+                ])
+            });
+
+            json!({
+                "cv": spend.cv().to_bytes(),
+                "nullifier": spend.nullifier().0,
+                "rk": rk,
+                "zkproof": spend.zkproof().as_ref().map(|proof| proof.to_vec()),
+                "spend_auth_sig": spend_auth_sig,
+                "recipient": spend
+                    .recipient()
+                    .map(|recipient| recipient.to_bytes().to_vec()),
+                "value": spend.value().map(|value| value.inner()),
+                "rcm": rcm,
+                "rseed": rseed,
+                "rcv": spend.rcv().as_ref().map(|rcv| rcv.inner().to_bytes()),
+                "proof_generation_key": proof_generation_key,
+                "witness": witness,
+                "alpha": spend.alpha().map(|alpha| alpha.to_bytes()),
+                "zip32_derivation": null,
+                "dummy_ask": spend.dummy_ask().as_ref().map(|ask| ask.to_bytes()),
+                "proprietary": spend.proprietary().clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let outputs = bundle
+        .outputs()
+        .iter()
+        .map(|output| {
+            json!({
+                "cv": output.cv().to_bytes(),
+                "cmu": output.cmu().to_bytes(),
+                "ephemeral_key": output.ephemeral_key().0,
+                "enc_ciphertext": output.enc_ciphertext().to_vec(),
+                "out_ciphertext": output.out_ciphertext().to_vec(),
+                "zkproof": output.zkproof().as_ref().map(|proof| proof.to_vec()),
+                "recipient": output
+                    .recipient()
+                    .map(|recipient| recipient.to_bytes().to_vec()),
+                "value": output.value().map(|value| value.inner()),
+                "rseed": *output.rseed(),
+                "rcv": output.rcv().as_ref().map(|rcv| rcv.inner().to_bytes()),
+                "ock": output.ock().as_ref().map(|ock| ock.0),
+                "zip32_derivation": null,
+                "user_address": output.user_address().clone(),
+                "proprietary": output.proprietary().clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let bsk: Option<[u8; 32]> = bundle.bsk().map(|bsk| bsk.into());
+
+    json!({
+        "spends": spends,
+        "outputs": outputs,
+        "value_sum": bundle.value_sum().to_raw(),
+        "anchor": bundle.anchor().to_bytes(),
+        "bsk": bsk,
+    })
+}
+
+/// Build the Sapling counterpart of the net-neutral drain: spend a real wallet
+/// note and send the entire value to a foreign Sapling address.
+fn sapling_net_neutral_drain_bundle_json(
+    spend_dfvk: &sapling_crypto::zip32::DiversifiableFullViewingKey,
+    foreign_dfvk: &sapling_crypto::zip32::DiversifiableFullViewingKey,
+    value: u64,
+) -> Value {
+    let mut rng = OsRng;
+    let spend_recipient = spend_dfvk.default_address().1;
+    let note = SaplingNote::from_parts(
+        spend_recipient,
+        SaplingNoteValue::from_raw(value),
+        SaplingRseed::AfterZip212([0x42; 32]),
+    );
+    let leaf = SaplingNode::from_cmu(&note.cmu());
+    let mut tree = SaplingCommitmentTree::empty();
+    tree.append(leaf).expect("Sapling note enters test tree");
+    let witness = SaplingIncrementalWitness::from_tree(tree).expect("non-empty Sapling tree");
+    let anchor = SaplingAnchor::from(witness.root());
+    let path = witness.path().expect("Sapling witness has a path");
+
+    let mut builder =
+        SaplingBuilder::new(Zip212Enforcement::On, SaplingBundleType::DEFAULT, anchor);
+    builder
+        .add_spend(spend_dfvk.fvk().clone(), note, path)
+        .expect("wallet Sapling note is spendable");
+    builder
+        .add_output(
+            None,
+            foreign_dfvk.default_address().1,
+            SaplingNoteValue::from_raw(value),
+            [0u8; 512],
+        )
+        .expect("foreign Sapling drain output is constructible");
+    let (bundle, _) = builder
+        .build_for_pczt(&mut rng)
+        .expect("Sapling PCZT bundle builds");
+    sapling_bundle_json(&bundle)
 }
 
 /// The PCZT the phone *claims* matches the approval: pay `APPROVED_AMOUNT` to
@@ -312,11 +498,8 @@ fn build_pczt<F: FnOnce(&mut Value)>(
     edit: F,
 ) -> Pczt {
     let mut value = empty_pczt_json();
-    value["transparent"]["inputs"] = json!([transparent_input_json(
-        INPUT_VALUE,
-        owned_hash,
-        SIGHASH_ALL
-    )]);
+    value["transparent"]["inputs"] =
+        json!([transparent_input_json(INPUT_VALUE, owned_hash, SIGHASH_ALL)]);
     value["transparent"]["outputs"] = json!([
         transparent_output_json(APPROVED_AMOUNT, recipient_hash, None),
         transparent_output_json(CHANGE_VALUE, owned_hash, None),
@@ -538,6 +721,268 @@ fn legacy_orchard_unshield_with_foreign_change_is_refused() {
     let verdict = pczt_verify(&bytes, &approved_tx(&recipient), &keys).expect("verdict");
     assert!(verdict.foreign_output_count > 0);
     assert!(!verdict.all_outputs_accounted);
+}
+
+#[test]
+fn zeroed_value_metadata_cannot_hide_foreign_orchard_output() {
+    const DRAIN: u64 = 500_000;
+
+    let (keys, owned) = wallet_keys();
+    let recipient_hash = FOREIGN_HASH;
+    let recipient = t_address(recipient_hash);
+    let spend_fvk = keys.orchard_fvk.as_ref().expect("wallet has Orchard FVK");
+    let foreign_keys = derive_wallet_viewing_keys(&[8u8; 32], COIN_TYPE, 0);
+    let foreign_fvk = foreign_keys
+        .orchard_fvk
+        .as_ref()
+        .expect("foreign wallet has Orchard FVK");
+
+    let mut value = empty_v6_pczt_json();
+    value["transparent"] = json!({
+        "inputs": [transparent_input_json(INPUT_VALUE, &owned, SIGHASH_ALL)],
+        "outputs": [
+            transparent_output_json(APPROVED_AMOUNT, &recipient_hash, None),
+            transparent_output_json(CHANGE_VALUE, &owned, None),
+        ],
+    });
+    let drain = orchard_protocol_net_neutral_drain_bundle_json(
+        spend_fvk,
+        foreign_fvk,
+        DRAIN,
+        BundleVersion::orchard_v3(),
+        [0u8; 512],
+    );
+    assert_eq!(drain["value_sum"], json!((0u64, false)));
+
+    value["orchard"] = drain.clone();
+    let honest_bytes = wire(pczt_from_v6_json(value.clone()));
+    let honest = pczt_verify(&honest_bytes, &approved_tx(&recipient), &keys)
+        .expect("honest foreign drain parses");
+    assert!(!honest.all_outputs_accounted);
+    assert!(honest.foreign_output_count > 0);
+    let no_keys = PcztSigningKeys {
+        orchard_sk: None,
+        sapling_ask: None,
+        transparent_sk: None,
+    };
+    assert!(
+        sign_pczt(&honest_bytes, &no_keys).is_ok(),
+        "authentic Orchard metadata must pass the signing-boundary guard"
+    );
+
+    let mut zeroed = drain;
+    for action in zeroed["actions"]
+        .as_array_mut()
+        .expect("Orchard actions are an array")
+    {
+        action["spend"]["value"] = json!(0u64);
+        action["output"]["value"] = json!(0u64);
+    }
+    value["orchard"] = zeroed;
+    let attack_bytes = wire(pczt_from_v6_json(value));
+    let attack = pczt_verify(&attack_bytes, &approved_tx(&recipient), &keys)
+        .expect("zeroed-metadata attack parses");
+
+    assert!(
+        !attack.all_outputs_accounted || attack.foreign_output_count > 0,
+        "zeroed Orchard metadata must not hide a foreign net-neutral drain"
+    );
+    assert!(
+        matches!(
+            sign_pczt(&attack_bytes, &no_keys),
+            Err(PcztSignError::UnverifiedShieldedMetadata)
+        ),
+        "the signing boundary must independently reject zeroed Orchard metadata"
+    );
+}
+
+#[test]
+fn zeroed_value_metadata_cannot_hide_foreign_sapling_output() {
+    const DRAIN: u64 = 500_000;
+
+    let (keys, owned) = wallet_keys();
+    let recipient_hash = FOREIGN_HASH;
+    let recipient = t_address(recipient_hash);
+    let spend_dfvk = keys.sapling_dfvk.as_ref().expect("wallet has Sapling DFVK");
+    let foreign_keys = derive_wallet_viewing_keys(&[8u8; 32], COIN_TYPE, 0);
+    let foreign_dfvk = foreign_keys
+        .sapling_dfvk
+        .as_ref()
+        .expect("foreign wallet has Sapling DFVK");
+
+    let mut value = empty_v6_pczt_json();
+    value["transparent"] = json!({
+        "inputs": [transparent_input_json(INPUT_VALUE, &owned, SIGHASH_ALL)],
+        "outputs": [
+            transparent_output_json(APPROVED_AMOUNT, &recipient_hash, None),
+            transparent_output_json(CHANGE_VALUE, &owned, None),
+        ],
+    });
+    let drain = sapling_net_neutral_drain_bundle_json(spend_dfvk, foreign_dfvk, DRAIN);
+    assert_eq!(drain["value_sum"], json!(0));
+
+    value["sapling"] = drain.clone();
+    let honest_bytes = wire(pczt_from_v6_json(value.clone()));
+    let honest = pczt_verify(&honest_bytes, &approved_tx(&recipient), &keys)
+        .expect("honest foreign Sapling drain parses");
+    assert!(!honest.all_outputs_accounted);
+    assert!(honest.foreign_output_count > 0);
+    let no_keys = PcztSigningKeys {
+        orchard_sk: None,
+        sapling_ask: None,
+        transparent_sk: None,
+    };
+    assert!(
+        sign_pczt(&honest_bytes, &no_keys).is_ok(),
+        "authentic Sapling metadata must pass the signing-boundary guard"
+    );
+
+    let mut zeroed = drain;
+    for spend in zeroed["spends"]
+        .as_array_mut()
+        .expect("Sapling spends are an array")
+    {
+        spend["value"] = json!(0u64);
+    }
+    for output in zeroed["outputs"]
+        .as_array_mut()
+        .expect("Sapling outputs are an array")
+    {
+        output["value"] = json!(0u64);
+    }
+    value["sapling"] = zeroed;
+    let attack_bytes = wire(pczt_from_v6_json(value));
+    let attack = pczt_verify(&attack_bytes, &approved_tx(&recipient), &keys)
+        .expect("zeroed Sapling-metadata attack parses");
+
+    assert!(
+        !attack.all_outputs_accounted || attack.foreign_output_count > 0,
+        "zeroed Sapling metadata must not hide a foreign net-neutral drain"
+    );
+    assert!(
+        matches!(
+            sign_pczt(&attack_bytes, &no_keys),
+            Err(PcztSignError::UnverifiedShieldedMetadata)
+        ),
+        "the signing boundary must independently reject zeroed Sapling metadata"
+    );
+}
+
+#[test]
+fn zeroed_value_metadata_cannot_hide_foreign_ironwood_output() {
+    const DRAIN: u64 = 500_000;
+
+    let (keys, owned) = wallet_keys();
+    let recipient_hash = FOREIGN_HASH;
+    let recipient = t_address(recipient_hash);
+    let spend_fvk = keys.orchard_fvk.as_ref().expect("wallet has Orchard FVK");
+    let foreign_keys = derive_wallet_viewing_keys(&[8u8; 32], COIN_TYPE, 0);
+    let foreign_fvk = foreign_keys
+        .orchard_fvk
+        .as_ref()
+        .expect("foreign wallet has Orchard FVK");
+
+    let mut value = empty_v6_pczt_json();
+    value["transparent"] = json!({
+        "inputs": [transparent_input_json(INPUT_VALUE, &owned, SIGHASH_ALL)],
+        "outputs": [
+            transparent_output_json(APPROVED_AMOUNT, &recipient_hash, None),
+            transparent_output_json(CHANGE_VALUE, &owned, None),
+        ],
+    });
+    let drain = orchard_protocol_net_neutral_drain_bundle_json(
+        spend_fvk,
+        foreign_fvk,
+        DRAIN,
+        BundleVersion::ironwood_v3(),
+        [0u8; 512],
+    );
+    assert_eq!(drain["value_sum"], json!((0u64, false)));
+
+    value["ironwood"] = drain.clone();
+    let honest_bytes = wire(pczt_from_v6_json(value.clone()));
+    let honest = pczt_verify(&honest_bytes, &approved_tx(&recipient), &keys)
+        .expect("honest foreign Ironwood drain parses");
+    assert!(!honest.all_outputs_accounted);
+    assert!(honest.foreign_output_count > 0);
+    let no_keys = PcztSigningKeys {
+        orchard_sk: None,
+        sapling_ask: None,
+        transparent_sk: None,
+    };
+    assert!(
+        sign_pczt(&honest_bytes, &no_keys).is_ok(),
+        "authentic Ironwood metadata must pass the signing-boundary guard"
+    );
+
+    let mut zeroed = drain;
+    for action in zeroed["actions"]
+        .as_array_mut()
+        .expect("Ironwood actions are an array")
+    {
+        action["spend"]["value"] = json!(0u64);
+        action["output"]["value"] = json!(0u64);
+    }
+    value["ironwood"] = zeroed;
+    let attack_bytes = wire(pczt_from_v6_json(value));
+    let attack = pczt_verify(&attack_bytes, &approved_tx(&recipient), &keys)
+        .expect("zeroed Ironwood-metadata attack parses");
+
+    assert!(
+        !attack.all_outputs_accounted || attack.foreign_output_count > 0,
+        "zeroed Ironwood metadata must not hide a foreign net-neutral drain"
+    );
+    assert!(
+        matches!(
+            sign_pczt(&attack_bytes, &no_keys),
+            Err(PcztSignError::UnverifiedShieldedMetadata)
+        ),
+        "the signing boundary must independently reject zeroed Ironwood metadata"
+    );
+}
+
+#[test]
+fn non_text_orchard_recipient_memo_is_refused() {
+    const PAYMENT: u64 = 500_000;
+
+    let (keys, _) = wallet_keys();
+    let spend_fvk = keys.orchard_fvk.as_ref().expect("wallet has Orchard FVK");
+    let recipient_keys = derive_wallet_viewing_keys(&[8u8; 32], COIN_TYPE, 0);
+    let recipient_fvk = recipient_keys
+        .orchard_fvk
+        .as_ref()
+        .expect("recipient wallet has Orchard FVK");
+    let recipient_receiver = recipient_fvk
+        .address_at(0u32, Scope::External)
+        .to_raw_address_bytes();
+    let recipient = UnifiedAddress::try_from_items(vec![Receiver::Orchard(recipient_receiver)])
+        .expect("single-Orchard-receiver UA is valid")
+        .encode(&NetworkType::Main);
+
+    let mut opaque_memo = [0u8; 512];
+    opaque_memo[0] = 0xFF;
+    opaque_memo[1] = 0x42;
+
+    let mut value = empty_v6_pczt_json();
+    value["ironwood"] = orchard_protocol_net_neutral_drain_bundle_json(
+        spend_fvk,
+        recipient_fvk,
+        PAYMENT,
+        BundleVersion::ironwood_v3(),
+        opaque_memo,
+    );
+    let bytes = wire(pczt_from_v6_json(value));
+
+    let verdict =
+        pczt_verify(&bytes, &approved_tx(&recipient), &keys).expect("opaque-memo payment parses");
+    assert_eq!(verdict.recipient_amount_zatoshis, PAYMENT);
+    assert_eq!(verdict.foreign_output_count, 0);
+    assert!(verdict.all_outputs_accounted);
+    assert!(verdict.memo_checked);
+    assert!(
+        !verdict.memo_matches,
+        "arbitrary memo bytes must not be treated as the approved empty memo"
+    );
 }
 
 /// CR-1507: post-NU6.3 Orchard turnstile — value must not *enter* legacy Orchard.

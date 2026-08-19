@@ -104,6 +104,7 @@ fn pczt_sign_secure(
             | PcztSignError::SummaryUnavailable
             | PcztSignError::SummaryOverflow
             | PcztSignError::UnsupportedSighashType
+            | PcztSignError::UnverifiedShieldedMetadata
             | PcztSignError::EncodeFailed => ZsigError::PcztSignFailed,
         }
     })?;

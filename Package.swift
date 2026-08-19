@@ -33,7 +33,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", exact: "1.7.1"),
-        .package(path: "../zcash-swift-wallet-sdk"),
+        .package(url: "https://github.com/Electric-Coin-Company/zcash-swift-wallet-sdk.git", from: "2.2.0"),
     ],
     targets: [
         // Pre-built Rust library as xcframework

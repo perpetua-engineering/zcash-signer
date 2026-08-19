@@ -816,6 +816,7 @@ int32_t zsig_derive_combined_ufvk_string(const uint8_t* seed,
  */
 typedef struct {
     uint32_t orchard_actions;
+    uint32_t ironwood_actions;
     uint32_t sapling_spends;
     uint32_t transparent_inputs;
     uint32_t transparent_outputs;
@@ -831,6 +832,7 @@ typedef struct {
     uint32_t transparent_outputs;
     uint32_t sapling_outputs;
     uint32_t orchard_outputs;
+    uint32_t ironwood_outputs;
     bool has_unverified_recipient_amount;
 } ZsigPcztSummary;
 
@@ -893,12 +895,19 @@ typedef struct {
     uint64_t recipient_amount_zatoshis;
     uint64_t wallet_owned_output_amount_zatoshis;
     uint64_t fee_zatoshis;
+    /* Publicly revealed net value leaving the legacy Orchard pool (pool
+     * crossing), zatoshis. Non-zero => the watch must display the crossing
+     * with its source/destination pools before approval (CR-1499). */
+    uint64_t legacy_orchard_net_outflow_zatoshis;
     uint32_t recipient_output_count;
     uint32_t foreign_output_count;
+    uint32_t orchard_action_count;   /* legacy Orchard actions in signed bytes */
+    uint32_t ironwood_action_count;  /* Ironwood actions in signed bytes */
     bool all_outputs_accounted;  /* every output recipient-or-owned */
     bool memo_matches;           /* recovered recipient memo == approved */
     bool memo_checked;           /* a memo comparison was performed */
     bool recipient_owned;        /* recipient is wallet-owned (ZEC-4 shielding) */
+    uint32_t expiry_height;      /* signed transaction expiry block */
 } ZsigPcztVerdict;
 
 /*

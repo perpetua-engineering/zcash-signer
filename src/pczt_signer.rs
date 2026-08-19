@@ -67,6 +67,9 @@ pub enum PcztSignError {
     /// `SIGHASH_ALL`, so its signature would not commit to the output set the
     /// watch just verified (CR-1485).
     UnsupportedSighashType,
+    /// Shielded output metadata does not reconstruct the note commitment in
+    /// the signed transaction.
+    UnverifiedShieldedMetadata,
     /// The signed PCZT could not be re-encoded (pczt 0.8 serialization is
     /// fallible: v1 cannot represent v6/Ironwood data).
     EncodeFailed,
@@ -88,6 +91,9 @@ impl fmt::Display for PcztSignError {
             Self::SummaryOverflow => write!(f, "PCZT summary overflow"),
             Self::UnsupportedSighashType => {
                 write!(f, "transparent input must use SIGHASH_ALL")
+            }
+            Self::UnverifiedShieldedMetadata => {
+                write!(f, "shielded output metadata does not match note commitment")
             }
             Self::EncodeFailed => write!(f, "failed to encode signed PCZT"),
         }
@@ -225,6 +231,15 @@ pub fn sign_pczt(
     // would be emitted — enforce here so a bypass of the verify path cannot
     // mint an unbound signature.
     enforce_sighash_all(&pczt)?;
+
+    // The signer is also the final trust boundary for shielded output metadata.
+    // A caller must not be able to bypass `pczt_verify` and obtain signatures
+    // after rewriting a real output's optional recipient/value/randomness fields
+    // to describe a harmless zero-valued dummy. Authenticate those fields
+    // against the signed note commitments before any key is used.
+    if !crate::pczt_verify::shielded_output_metadata_is_authenticated(&pczt) {
+        return Err(PcztSignError::UnverifiedShieldedMetadata);
+    }
 
     // Get spend counts before constructing Signer (which takes ownership).
     let orchard_count = pczt.orchard().actions().len();
@@ -789,6 +804,7 @@ pub unsafe extern "C" fn zsig_pczt_sign(
                 | PcztSignError::SummaryUnavailable
                 | PcztSignError::SummaryOverflow
                 | PcztSignError::UnsupportedSighashType
+                | PcztSignError::UnverifiedShieldedMetadata
                 | PcztSignError::EncodeFailed => ZsigError::PcztSignFailed,
             };
         }
